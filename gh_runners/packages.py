@@ -405,6 +405,48 @@ def pwsh_home(tc_dir: Path) -> Path:
     return tc_dir / "pwsh"
 
 
+def _install_python(tc_dir: Path, arch: str, cfg: dict[str, Any]) -> None:
+    """Install Python via winget on Windows. On Linux, skips (host Python used)."""
+    import sys
+
+    version: str = cfg.get("version", "3.12")
+
+    if sys.platform != "win32":
+        print(
+            f"  python: skipping (Linux runners use host Python {sys.version.split()[0]})"
+        )
+        return
+
+    # Check if already installed
+    result = run_cmd(["python", "--version"], capture=True, check=False)
+    if result.returncode == 0:
+        current = result.stdout.strip().replace("Python ", "")
+        if current.startswith(version):
+            print(f"  python: {current} already installed")
+            return
+        print(f"  python: {current} found, installing {version}...")
+    else:
+        print(f"  python: installing {version} via winget...")
+
+    # Derive the winget ID — Python.Python.3.XX
+    major_minor = version if "." in version else f"{version}.0"
+    winget_id = f"Python.Python.{major_minor}"
+
+    run_cmd(
+        [
+            "winget",
+            "install",
+            "--id",
+            winget_id,
+            "--accept-source-agreements",
+            "--accept-package-agreements",
+            "--silent",
+        ],
+        check=False,
+    )
+    print(f"  python: {version} ready")
+
+
 # ---------------------------------------------------------------------------
 # Package Registry
 # ---------------------------------------------------------------------------
@@ -567,6 +609,22 @@ PACKAGES: dict[str, Package] = {
                 parse=lambda out: out.strip().replace("PowerShell ", ""),
                 why="PowerShell Core for CI jobs",
                 min_version="7.4",
+            ),
+        ],
+    ),
+    "python": Package(
+        name="python",
+        description="Python runtime (Windows: winget, Linux: uses host Python)",
+        install_fn=_install_python,
+        supported_archs={"x64", "arm64", "arm"},
+        default_version="3.12",
+        host_checks=[
+            HostCheck(
+                name="python",
+                cmd=["python", "--version"],
+                parse=lambda out: out.strip().replace("Python ", ""),
+                why="Python runtime for CI jobs",
+                min_version="3.11",
             ),
         ],
     ),
