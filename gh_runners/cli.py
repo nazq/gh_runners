@@ -1,4 +1,4 @@
-"""CLI entry point for ghr — built with Typer."""
+"""CLI entry point for gh-runners — built with Typer."""
 
 from __future__ import annotations
 
@@ -32,7 +32,7 @@ from gh_runners.platform import (
 )
 
 app = typer.Typer(
-    name="ghr",
+    name="gh-runners",
     help="GitHub Actions self-hosted runner manager.",
     add_completion=False,
     no_args_is_help=True,
@@ -108,7 +108,7 @@ def _resolve_token(token: str | None, org: OrgConfig) -> str:
     gh_org = _gh_org_from_url(org.url) or org.name
     print(f"\n  ERROR: No registration token for {org.name}.")
     print("  Provide one of:")
-    print(f"    ghr setup --token TOKEN --org {org.name}")
+    print(f"    gh-runners setup --token TOKEN --org {org.name}")
     print("  Or install gh CLI and authenticate:")
     print("    gh auth login")
     print(
@@ -292,7 +292,7 @@ def setup(token: Token = None, org: Org = None) -> None:
         tc_dir = toolchain_dir()
         if not tc_dir.exists():
             print(
-                "WARNING: Shared toolchain not found. Run 'ghr setup-toolchain' first."
+                "WARNING: Shared toolchain not found. Run 'gh-runners setup-toolchain' first."
             )
             print("Runners will use system PATH (no isolation).\n")
 
@@ -373,7 +373,7 @@ def setup(token: Token = None, org: Org = None) -> None:
     total = sum(o.runner_count for o in orgs)
     print(f"\nSetup complete! {total} runners configured and running.")
     print("They will auto-start on reboot.")
-    print("\nCheck status: ghr status")
+    print("\nCheck status: gh-runners status")
 
 
 @app.command()
@@ -524,7 +524,7 @@ def clean(org: Org = None) -> None:
     active = _get_active_runners(cfg, org)
     if active:
         print(f"WARNING: Active jobs on: {', '.join(active)}")
-        print("Stop runners first: ghr stop")
+        print("Stop runners first: gh-runners stop")
         raise typer.Exit(1)
 
     _clean_work_dirs(cfg, org)

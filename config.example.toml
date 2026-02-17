@@ -22,7 +22,7 @@ poll_interval = 10
 #
 # Each package gets its own sub-table for version + any extra config.
 # Available packages: rust, node, cargo-tools, go, pnpm, bun
-# Run `ghr list-packages` to see all available packages.
+# Run `gh-runners list-packages` to see all available packages.
 
 [toolchain]
 packages = ["rust", "node", "cargo-tools"]

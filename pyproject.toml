@@ -26,7 +26,7 @@ Repository = "https://github.com/nazq/gh_runners"
 Issues = "https://github.com/nazq/gh_runners/issues"
 
 [project.scripts]
-ghr = "gh_runners.cli:main"
+gh-runners = "gh_runners.cli:main"
 
 [build-system]
 requires = ["hatchling"]
