@@ -221,6 +221,15 @@ def _dir_size_human(path: Path) -> str:
     return f"{total:.1f} TB"
 
 
+def _rmtree_readonly(func, path, exc):
+    """Handle read-only files (e.g. .git objects) during rmtree on Windows."""
+    import os
+    import stat
+
+    os.chmod(path, stat.S_IWRITE)
+    func(path)
+
+
 def _clean_work_dirs(cfg: Config, org_name: str | None) -> None:
     print("Cleaning work directories...")
     for org in _select_orgs(cfg, org_name):
@@ -229,7 +238,7 @@ def _clean_work_dirs(cfg: Config, org_name: str | None) -> None:
             work_dir = org.runner_dir(i) / "_work"
             if work_dir.exists():
                 size = _dir_size_human(work_dir)
-                shutil.rmtree(work_dir)
+                shutil.rmtree(work_dir, onexc=_rmtree_readonly)
                 work_dir.mkdir()
                 print(f"  {name}/_work cleaned (was {size})")
 
@@ -577,7 +586,7 @@ def remove(token: Token = None, org: Org = None) -> None:
             )
 
             print(f"  Removing {rdir}...")
-            shutil.rmtree(rdir, ignore_errors=True)
+            shutil.rmtree(rdir, onexc=_rmtree_readonly)
             print(f"  {name} removed.")
 
     print("\nAll runners removed.")
