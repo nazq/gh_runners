@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import platform
 import struct
@@ -77,10 +78,98 @@ def run_script(runner_dir: Path) -> str:
 
 
 def svc_script(runner_dir: Path) -> str:
-    """Get the service management script for this platform."""
-    if is_windows():
-        return str(runner_dir / "svc.cmd")
+    """Get the service management script for this platform (Linux/macOS only)."""
     return str(runner_dir / "svc.sh")
+
+
+# ---------------------------------------------------------------------------
+# Windows scheduled-task helpers  (run runners at user logon)
+# ---------------------------------------------------------------------------
+
+
+def _win_task_name(runner_dir: Path) -> str | None:
+    """Derive the scheduled task name from the runner's .runner config.
+
+    Returns a name like ``GitHubRunner-ghr-1``.
+    """
+    runner_file = runner_dir / ".runner"
+    if not runner_file.exists():
+        return None
+    try:
+        data = json.loads(runner_file.read_text(encoding="utf-8-sig"))
+    except (json.JSONDecodeError, OSError):
+        return None
+    agent_name: str = data.get("agentName", "")
+    if not agent_name:
+        return None
+    return f"GitHubRunner-{agent_name}"
+
+
+def win_create_logon_task(runner_dir: Path) -> None:
+    """Create a scheduled task that starts the runner at user logon."""
+    task = _win_task_name(runner_dir)
+    if not task:
+        print(f"  WARNING: Cannot determine task name for {runner_dir}")
+        return
+    run_script = str(runner_dir / "run.cmd")
+    # /F overwrites if exists, /RL HIGHEST = run elevated
+    run_cmd(
+        [
+            "schtasks",
+            "/Create",
+            "/TN",
+            task,
+            "/TR",
+            run_script,
+            "/SC",
+            "ONLOGON",
+            "/RL",
+            "HIGHEST",
+            "/F",
+        ],
+        check=False,
+    )
+
+
+def win_start_task(runner_dir: Path) -> None:
+    """Start a runner's scheduled task immediately."""
+    task = _win_task_name(runner_dir)
+    if not task:
+        print(f"  WARNING: Cannot determine task name for {runner_dir}")
+        return
+    run_cmd(["schtasks", "/Run", "/TN", task], check=False)
+
+
+def win_stop_task(runner_dir: Path) -> None:
+    """Stop a runner's scheduled task."""
+    task = _win_task_name(runner_dir)
+    if not task:
+        print(f"  WARNING: Cannot determine task name for {runner_dir}")
+        return
+    run_cmd(["schtasks", "/End", "/TN", task], check=False)
+
+
+def win_delete_task(runner_dir: Path) -> None:
+    """Delete a runner's scheduled task."""
+    task = _win_task_name(runner_dir)
+    if not task:
+        print(f"  WARNING: Cannot determine task name for {runner_dir}")
+        return
+    run_cmd(["schtasks", "/Delete", "/TN", task, "/F"], check=False)
+
+
+def win_task_status(runner_dir: Path) -> str:
+    """Query whether a runner's scheduled task exists and its state."""
+    task = _win_task_name(runner_dir)
+    if not task:
+        return "unknown"
+    result = run_powershell(
+        f"(Get-ScheduledTask -TaskName '{task}' -ErrorAction SilentlyContinue).State",
+        capture=True,
+        check=False,
+    )
+    state = result.stdout.strip()
+    return state.lower() if state else "not-installed"
 
 
 def default_labels() -> str:
@@ -232,9 +321,8 @@ WantedBy=default.target
 
 
 def start_service(service_prefix: str, idx: int) -> None:
-    """Start a runner service."""
+    """Start a runner service (Linux/macOS only — see win_start_service for Windows)."""
     if is_windows():
-        # Handled via svc.cmd in the caller
         return
     run_cmd(
         ["systemctl", "--user", "start", systemd_service_name(service_prefix, idx)],
@@ -243,7 +331,7 @@ def start_service(service_prefix: str, idx: int) -> None:
 
 
 def stop_service(service_prefix: str, idx: int) -> None:
-    """Stop a runner service."""
+    """Stop a runner service (Linux/macOS only — see win_stop_service for Windows)."""
     if is_windows():
         return
     run_cmd(
@@ -252,8 +340,14 @@ def stop_service(service_prefix: str, idx: int) -> None:
     )
 
 
-def service_status(service_prefix: str, idx: int) -> str:
+def service_status(
+    service_prefix: str, idx: int, *, runner_dir: Path | None = None
+) -> str:
     """Get service status string."""
+    if is_windows():
+        if runner_dir is not None:
+            return win_task_status(runner_dir)
+        return "unknown"
     if is_linux() or is_macos():
         result = run_cmd(
             [

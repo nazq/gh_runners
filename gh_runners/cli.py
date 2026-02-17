@@ -7,6 +7,7 @@ import tarfile
 import time
 import zipfile
 from pathlib import Path
+from collections.abc import Callable
 from typing import Annotated, Optional
 
 import typer
@@ -27,8 +28,11 @@ from gh_runners.platform import (
     service_status,
     start_service,
     stop_service,
-    svc_script,
     uninstall_systemd_service,
+    win_create_logon_task,
+    win_delete_task,
+    win_start_task,
+    win_stop_task,
 )
 
 app = typer.Typer(
@@ -218,6 +222,15 @@ def _dir_size_human(path: Path) -> str:
     return f"{total:.1f} TB"
 
 
+def _rmtree_readonly(func: Callable[..., object], path: str, exc: object) -> None:
+    """Handle read-only files (e.g. .git objects) during rmtree on Windows."""
+    import os
+    import stat
+
+    os.chmod(path, stat.S_IWRITE)
+    func(path)
+
+
 def _clean_work_dirs(cfg: Config, org_name: str | None) -> None:
     print("Cleaning work directories...")
     for org in _select_orgs(cfg, org_name):
@@ -226,7 +239,7 @@ def _clean_work_dirs(cfg: Config, org_name: str | None) -> None:
             work_dir = org.runner_dir(i) / "_work"
             if work_dir.exists():
                 size = _dir_size_human(work_dir)
-                shutil.rmtree(work_dir)
+                shutil.rmtree(work_dir, onexc=_rmtree_readonly)
                 work_dir.mkdir()
                 print(f"  {name}/_work cleaned (was {size})")
 
@@ -272,10 +285,15 @@ def setup_toolchain() -> None:
 
 
 @app.command()
-def setup(token: Token = None, org: Org = None) -> None:
-    """Download, configure, and install runners as services.
+def setup(
+    token: Token = None,
+    org: Org = None,
+) -> None:
+    """Download, configure, and install runners.
 
     If --token is omitted, automatically fetches one via gh CLI.
+    On Windows, a scheduled task is created per runner so they
+    start automatically at user logon.
     """
     if is_windows():
         require_admin()
@@ -347,13 +365,17 @@ def setup(token: Token = None, org: Org = None) -> None:
                 config_args.extend(["--runnergroup", o.runner_group])
 
             print("  Configuring...")
-            run_cmd(config_args, cwd=rdir)
+            result = run_cmd(config_args, cwd=rdir, check=False)
+
+            if result.returncode != 0:
+                print(f"  ERROR: Configuration failed (exit code {result.returncode}).")
+                continue
 
             if is_windows():
-                print("  Installing Windows Service...")
-                run_cmd([svc_script(rdir), "install"], cwd=rdir)
-                print("  Starting service...")
-                run_cmd([svc_script(rdir), "start"], cwd=rdir)
+                print("  Creating logon task...")
+                win_create_logon_task(rdir)
+                print("  Starting runner...")
+                win_start_task(rdir)
             print(f"  {name} configured.")
 
         # Linux: install systemd services for this org
@@ -392,7 +414,7 @@ def start(org: Org = None) -> None:
                 print(f"  {name}: not set up, skipping")
                 continue
             if is_windows():
-                run_cmd([svc_script(rdir), "start"], cwd=rdir, check=False)
+                win_start_task(rdir)
             else:
                 start_service(o.service_prefix, i)
             print(f"  {name}: started")
@@ -415,7 +437,7 @@ def stop(org: Org = None) -> None:
                 print(f"  {name}: not set up, skipping")
                 continue
             if is_windows():
-                run_cmd([svc_script(rdir), "stop"], cwd=rdir, check=False)
+                win_stop_task(rdir)
             else:
                 stop_service(o.service_prefix, i)
             print(f"  {name}: stopped")
@@ -449,7 +471,7 @@ def restart(
             if not rdir.exists():
                 continue
             if is_windows():
-                run_cmd([svc_script(rdir), "stop"], cwd=rdir, check=False)
+                win_stop_task(rdir)
             else:
                 stop_service(o.service_prefix, i)
 
@@ -463,7 +485,7 @@ def restart(
             if not rdir.exists():
                 continue
             if is_windows():
-                run_cmd([svc_script(rdir), "start"], cwd=rdir, check=False)
+                win_start_task(rdir)
             else:
                 start_service(o.service_prefix, i)
 
@@ -486,13 +508,7 @@ def status(org: Org = None) -> None:
             if not rdir.exists():
                 svc_status = "not set up"
             elif is_windows():
-                svc = f"actions.runner.{name}"
-                result = run_powershell(
-                    f"(Get-Service -Name '{svc}' -ErrorAction SilentlyContinue).Status",
-                    capture=True,
-                    check=False,
-                )
-                svc_status = result.stdout.strip() or "not installed"
+                svc_status = service_status(o.service_prefix, i, runner_dir=rdir)
             else:
                 svc_status = service_status(o.service_prefix, i)
 
@@ -558,10 +574,10 @@ def remove(token: Token = None, org: Org = None) -> None:
                 continue
 
             if is_windows():
-                print("  Stopping service...")
-                run_cmd([svc_script(rdir), "stop"], cwd=rdir, check=False)
-                print("  Uninstalling service...")
-                run_cmd([svc_script(rdir), "uninstall"], cwd=rdir, check=False)
+                print("  Stopping runner...")
+                win_stop_task(rdir)
+                print("  Removing logon task...")
+                win_delete_task(rdir)
 
             print("  Unregistering from GitHub...")
             run_cmd(
@@ -571,7 +587,7 @@ def remove(token: Token = None, org: Org = None) -> None:
             )
 
             print(f"  Removing {rdir}...")
-            shutil.rmtree(rdir, ignore_errors=True)
+            shutil.rmtree(rdir, onexc=_rmtree_readonly)
             print(f"  {name} removed.")
 
     print("\nAll runners removed.")

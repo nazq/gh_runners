@@ -18,6 +18,7 @@ from gh_runners.packages import (
     go_home,
     install_package,
     node_home,
+    pwsh_home,
     rustup_home,
 )
 from gh_runners.platform import detect_arch, is_linux, run_cmd
@@ -41,6 +42,7 @@ def toolchain_env(tc_dir: Path) -> dict[str, str]:
         cargo_home(tc_dir) / "bin",
         node_home(tc_dir) / "bin",
         go_home(tc_dir) / "bin",
+        pwsh_home(tc_dir),
         bun_home(tc_dir),
     ]:
         if bindir.exists():
@@ -122,6 +124,11 @@ def _verify_windows_toolchain(cfg: Config) -> None:
         expected = tc.pkg_cfg("go").get("version", "")
         if expected:
             checks.append(("go", expected, ["go", "version"], ""))
+
+    if "pwsh" in tc.packages:
+        expected = tc.pkg_cfg("pwsh").get("version", "")
+        if expected:
+            checks.append(("pwsh", expected, ["pwsh", "--version"], ""))
 
     for name, expected, cmd, _extra in checks:
         result = run_cmd(cmd, capture=True, check=False)

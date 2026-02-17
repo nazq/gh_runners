@@ -21,7 +21,7 @@ poll_interval = 10
 # with your personal dev tools. Windows users install tools globally.
 #
 # Each package gets its own sub-table for version + any extra config.
-# Available packages: rust, node, cargo-tools, go, pnpm, bun
+# Available packages: rust, node, cargo-tools, go, pnpm, bun, pwsh, python
 # Run `gh-runners list-packages` to see all available packages.
 
 [toolchain]
@@ -46,6 +46,12 @@ crates = "cargo-llvm-cov just tauri-cli"
 #
 # [toolchain.bun]
 # version = "1.2.2"
+#
+# [toolchain.pwsh]
+# version = "7.5.4"
+#
+# [toolchain.python]
+# version = "3.12"
 
 # ── Organizations ────────────────────────────────────────────────
 # Define one [[org]] block per GitHub organization.
