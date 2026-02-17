@@ -11,7 +11,7 @@ jobs:
   release:
     runs-on: ubuntu-latest
     concurrency:
-      group: release
+      group: ${{ github.workflow }}-release-${{ github.ref_name }}
       cancel-in-progress: false
 
     permissions:
@@ -20,7 +20,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          ref: ${{ github.ref_name }}
+          token: ${{ secrets.RELEASE_TOKEN }}
+
+      - name: Force to Workflow SHA
+        run: git reset --hard ${{ github.sha }}
+
+      - uses: astral-sh/setup-uv@v6
 
       - name: Semantic Release
         id: release
@@ -29,6 +35,13 @@ jobs:
           github_token: ${{ secrets.RELEASE_TOKEN }}
           git_committer_name: "github-actions"
           git_committer_email: "actions@users.noreply.github.com"
+
+      - name: Upload to GitHub Release
+        uses: python-semantic-release/publish-action@v10.5.3
+        if: steps.release.outputs.released == 'true'
+        with:
+          github_token: ${{ secrets.RELEASE_TOKEN }}
+          tag: ${{ steps.release.outputs.tag }}
 
     outputs:
       released: ${{ steps.release.outputs.released || 'false' }}
