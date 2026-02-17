@@ -188,7 +188,7 @@ def require_admin() -> None:
         try:
             import ctypes
 
-            if not ctypes.windll.shell32.IsUserAnAdmin():  # type: ignore[attr-defined]
+            if not ctypes.windll.shell32.IsUserAnAdmin():
                 print("ERROR: Administrator privileges required.")
                 print("Right-click your terminal and select 'Run as Administrator'.")
                 sys.exit(1)

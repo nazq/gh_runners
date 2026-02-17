@@ -7,6 +7,7 @@ import tarfile
 import time
 import zipfile
 from pathlib import Path
+from collections.abc import Callable
 from typing import Annotated, Optional
 
 import typer
@@ -221,7 +222,7 @@ def _dir_size_human(path: Path) -> str:
     return f"{total:.1f} TB"
 
 
-def _rmtree_readonly(func, path, exc):
+def _rmtree_readonly(func: Callable[..., object], path: str, exc: object) -> None:
     """Handle read-only files (e.g. .git objects) during rmtree on Windows."""
     import os
     import stat
