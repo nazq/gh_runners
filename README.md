@@ -1,5 +1,7 @@
 # gh-runners
 
+[![CI](https://github.com/nazq/gh_runners/actions/workflows/ci.yml/badge.svg)](https://github.com/nazq/gh_runners/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/gh-runners?color=blue)](https://pypi.org/project/gh-runners/)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-3776ab?logo=python&logoColor=white)](https://python.org)
 [![Typed: mypy strict](https://img.shields.io/badge/typed-mypy%20strict-1674b1?logo=python&logoColor=white)](https://mypy-lang.org)
 [![Linted: ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
@@ -15,11 +17,14 @@ Built primarily for Rust/Tauri/Node CI but works for any workload. Linux and Win
 ## Install
 
 ```bash
-# Global install via uv
+# From PyPI
 uv tool install gh-runners
 
-# Or run directly without installing
-uvx --from gh-runners ghr --help
+# Or pip
+pip install gh-runners
+
+# Verify
+ghr --help
 ```
 
 ## Quick Start
