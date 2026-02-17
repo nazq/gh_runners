@@ -329,6 +329,73 @@ def _install_bun(tc_dir: Path, arch: str, cfg: dict[str, Any]) -> None:
     print(f"  bun: {version} ready")
 
 
+def _install_pwsh(tc_dir: Path, arch: str, cfg: dict[str, Any]) -> None:
+    """Install PowerShell Core.
+
+    On Windows, uses winget (globally); on Linux, downloads from GitHub
+    releases into the shared toolchain directory.
+    """
+    import sys
+
+    version: str = cfg.get("version", "7.5.4")
+
+    if sys.platform == "win32":
+        # Windows: install/upgrade via winget
+        result = run_cmd(["pwsh", "--version"], capture=True, check=False)
+        if result.returncode == 0:
+            current = result.stdout.strip().replace("PowerShell ", "")
+            if current.startswith(version):
+                print(f"  pwsh: {version} already installed")
+                return
+            print(f"  pwsh: upgrading {current} -> {version}...")
+        else:
+            print(f"  pwsh: installing {version} via winget...")
+        run_cmd(
+            ["winget", "install", "--id", "Microsoft.PowerShell",
+             "--version", version, "--accept-source-agreements",
+             "--accept-package-agreements", "--silent"],
+            check=False,
+        )
+        print(f"  pwsh: {version} ready")
+    else:
+        # Linux: download from GitHub releases
+        pwsh_dir = tc_dir / "pwsh"
+        pwsh_bin = pwsh_dir / "pwsh"
+
+        if pwsh_bin.exists():
+            result = run_cmd([str(pwsh_bin), "--version"], capture=True, check=False)
+            current = result.stdout.strip().replace("PowerShell ", "")
+            if current.startswith(version):
+                print(f"  pwsh: {version} already installed")
+                return
+            print(f"  pwsh: upgrading {current} -> {version}...")
+
+        pwsh_arch = {"x64": "x64", "arm64": "arm64", "arm": "arm32"}.get(arch, "x64")
+        tarball = f"powershell-{version}-linux-{pwsh_arch}.tar.gz"
+        url = f"https://github.com/PowerShell/PowerShell/releases/download/v{version}/{tarball}"
+
+        print(f"  pwsh: downloading {version} ({pwsh_arch})...")
+        tarball_path = tc_dir / tarball
+        run_cmd(["curl", "-sSL", "-o", str(tarball_path), url])
+
+        if pwsh_dir.exists():
+            import shutil
+            shutil.rmtree(pwsh_dir)
+        pwsh_dir.mkdir(parents=True)
+
+        with tarfile.open(tarball_path, "r:gz") as tf:
+            tf.extractall(pwsh_dir)
+
+        # Make pwsh executable
+        pwsh_bin.chmod(0o755)
+        tarball_path.unlink(missing_ok=True)
+        print(f"  pwsh: {version} ready")
+
+
+def pwsh_home(tc_dir: Path) -> Path:
+    return tc_dir / "pwsh"
+
+
 # ---------------------------------------------------------------------------
 # Package Registry
 # ---------------------------------------------------------------------------
@@ -475,6 +542,22 @@ PACKAGES: dict[str, Package] = {
                 cmd=["bun", "--version"],
                 parse=lambda out: out.strip(),
                 why="JavaScript runtime",
+            ),
+        ],
+    ),
+    "pwsh": Package(
+        name="pwsh",
+        description="PowerShell Core (cross-platform)",
+        install_fn=_install_pwsh,
+        supported_archs={"x64", "arm64", "arm"},
+        default_version="7.5.4",
+        host_checks=[
+            HostCheck(
+                name="pwsh",
+                cmd=["pwsh", "--version"],
+                parse=lambda out: out.strip().replace("PowerShell ", ""),
+                why="PowerShell Core for CI jobs",
+                min_version="7.4",
             ),
         ],
     ),

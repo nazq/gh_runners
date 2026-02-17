@@ -28,9 +28,10 @@ from gh_runners.platform import (
     start_service,
     stop_service,
     uninstall_systemd_service,
-    win_delete_service,
-    win_start_service,
-    win_stop_service,
+    win_create_logon_task,
+    win_delete_task,
+    win_start_task,
+    win_stop_task,
 )
 
 app = typer.Typer(
@@ -274,10 +275,15 @@ def setup_toolchain() -> None:
 
 
 @app.command()
-def setup(token: Token = None, org: Org = None) -> None:
-    """Download, configure, and install runners as services.
+def setup(
+    token: Token = None,
+    org: Org = None,
+) -> None:
+    """Download, configure, and install runners.
 
     If --token is omitted, automatically fetches one via gh CLI.
+    On Windows, a scheduled task is created per runner so they
+    start automatically at user logon.
     """
     if is_windows():
         require_admin()
@@ -348,17 +354,18 @@ def setup(token: Token = None, org: Org = None) -> None:
             if o.runner_group and o.runner_group != "Default":
                 config_args.extend(["--runnergroup", o.runner_group])
 
-            # On Windows, --runasservice makes config.cmd also install the
-            # Windows service in one step (replaces the old svc.cmd workflow).
-            if is_windows():
-                config_args.append("--runasservice")
-
             print("  Configuring...")
-            run_cmd(config_args, cwd=rdir)
+            result = run_cmd(config_args, cwd=rdir, check=False)
+
+            if result.returncode != 0:
+                print(f"  ERROR: Configuration failed (exit code {result.returncode}).")
+                continue
 
             if is_windows():
-                print("  Starting Windows Service...")
-                win_start_service(rdir)
+                print("  Creating logon task...")
+                win_create_logon_task(rdir)
+                print("  Starting runner...")
+                win_start_task(rdir)
             print(f"  {name} configured.")
 
         # Linux: install systemd services for this org
@@ -397,7 +404,7 @@ def start(org: Org = None) -> None:
                 print(f"  {name}: not set up, skipping")
                 continue
             if is_windows():
-                win_start_service(rdir)
+                win_start_task(rdir)
             else:
                 start_service(o.service_prefix, i)
             print(f"  {name}: started")
@@ -420,7 +427,7 @@ def stop(org: Org = None) -> None:
                 print(f"  {name}: not set up, skipping")
                 continue
             if is_windows():
-                win_stop_service(rdir)
+                win_stop_task(rdir)
             else:
                 stop_service(o.service_prefix, i)
             print(f"  {name}: stopped")
@@ -454,7 +461,7 @@ def restart(
             if not rdir.exists():
                 continue
             if is_windows():
-                win_stop_service(rdir)
+                win_stop_task(rdir)
             else:
                 stop_service(o.service_prefix, i)
 
@@ -468,7 +475,7 @@ def restart(
             if not rdir.exists():
                 continue
             if is_windows():
-                win_start_service(rdir)
+                win_start_task(rdir)
             else:
                 start_service(o.service_prefix, i)
 
@@ -557,10 +564,10 @@ def remove(token: Token = None, org: Org = None) -> None:
                 continue
 
             if is_windows():
-                print("  Stopping service...")
-                win_stop_service(rdir)
-                print("  Uninstalling service...")
-                win_delete_service(rdir)
+                print("  Stopping runner...")
+                win_stop_task(rdir)
+                print("  Removing logon task...")
+                win_delete_task(rdir)
 
             print("  Unregistering from GitHub...")
             run_cmd(

@@ -83,16 +83,14 @@ def svc_script(runner_dir: Path) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Windows service helpers  (replaces the removed svc.cmd)
+# Windows scheduled-task helpers  (run runners at user logon)
 # ---------------------------------------------------------------------------
 
 
-def win_service_name(runner_dir: Path) -> str | None:
-    """Derive the Windows service name from the runner's .runner config.
+def _win_task_name(runner_dir: Path) -> str | None:
+    """Derive the scheduled task name from the runner's .runner config.
 
-    The runner agent writes *agentName* and *gitHubUrl* into ``.runner``.
-    The service name follows the convention used by ``config.cmd --runasservice``:
-    ``actions.runner.<OrgOrOwner-Repo>.<agentName>``
+    Returns a name like ``GitHubRunner-ghr-1``.
     """
     runner_file = runner_dir / ".runner"
     if not runner_file.exists():
@@ -102,60 +100,76 @@ def win_service_name(runner_dir: Path) -> str | None:
     except (json.JSONDecodeError, OSError):
         return None
     agent_name: str = data.get("agentName", "")
-    github_url: str = data.get("gitHubUrl", "")
-    if not agent_name or not github_url:
+    if not agent_name:
         return None
-    # https://github.com/Org -> ["https:", "", "github.com", "Org"]
-    # https://github.com/Org/Repo -> [..., "Org", "Repo"]
-    parts = github_url.rstrip("/").split("/")
-    if len(parts) >= 5:
-        slug = f"{parts[3]}-{parts[4]}"
-    elif len(parts) >= 4:
-        slug = parts[3]
-    else:
-        return None
-    return f"actions.runner.{slug}.{agent_name}"
+    return f"GitHubRunner-{agent_name}"
 
 
-def win_start_service(runner_dir: Path) -> None:
-    """Start a GitHub Actions runner Windows service."""
-    svc = win_service_name(runner_dir)
-    if not svc:
-        print(f"  WARNING: Cannot determine service name for {runner_dir}")
+def win_create_logon_task(runner_dir: Path) -> None:
+    """Create a scheduled task that starts the runner at user logon."""
+    task = _win_task_name(runner_dir)
+    if not task:
+        print(f"  WARNING: Cannot determine task name for {runner_dir}")
         return
-    run_cmd(["sc.exe", "start", svc], check=False)
+    run_script = str(runner_dir / "run.cmd")
+    # /F overwrites if exists, /RL HIGHEST = run elevated
+    run_cmd(
+        [
+            "schtasks",
+            "/Create",
+            "/TN",
+            task,
+            "/TR",
+            run_script,
+            "/SC",
+            "ONLOGON",
+            "/RL",
+            "HIGHEST",
+            "/F",
+        ],
+        check=False,
+    )
 
 
-def win_stop_service(runner_dir: Path) -> None:
-    """Stop a GitHub Actions runner Windows service."""
-    svc = win_service_name(runner_dir)
-    if not svc:
-        print(f"  WARNING: Cannot determine service name for {runner_dir}")
+def win_start_task(runner_dir: Path) -> None:
+    """Start a runner's scheduled task immediately."""
+    task = _win_task_name(runner_dir)
+    if not task:
+        print(f"  WARNING: Cannot determine task name for {runner_dir}")
         return
-    run_cmd(["sc.exe", "stop", svc], check=False)
+    run_cmd(["schtasks", "/Run", "/TN", task], check=False)
 
 
-def win_delete_service(runner_dir: Path) -> None:
-    """Delete (uninstall) a GitHub Actions runner Windows service."""
-    svc = win_service_name(runner_dir)
-    if not svc:
-        print(f"  WARNING: Cannot determine service name for {runner_dir}")
+def win_stop_task(runner_dir: Path) -> None:
+    """Stop a runner's scheduled task."""
+    task = _win_task_name(runner_dir)
+    if not task:
+        print(f"  WARNING: Cannot determine task name for {runner_dir}")
         return
-    run_cmd(["sc.exe", "delete", svc], check=False)
+    run_cmd(["schtasks", "/End", "/TN", task], check=False)
 
 
-def win_service_status(runner_dir: Path) -> str:
-    """Query the status of a runner Windows service."""
-    svc = win_service_name(runner_dir)
-    if not svc:
+def win_delete_task(runner_dir: Path) -> None:
+    """Delete a runner's scheduled task."""
+    task = _win_task_name(runner_dir)
+    if not task:
+        print(f"  WARNING: Cannot determine task name for {runner_dir}")
+        return
+    run_cmd(["schtasks", "/Delete", "/TN", task, "/F"], check=False)
+
+
+def win_task_status(runner_dir: Path) -> str:
+    """Query whether a runner's scheduled task exists and its state."""
+    task = _win_task_name(runner_dir)
+    if not task:
         return "unknown"
     result = run_powershell(
-        f"(Get-Service -Name '{svc}' -ErrorAction SilentlyContinue).Status",
+        f"(Get-ScheduledTask -TaskName '{task}' -ErrorAction SilentlyContinue).State",
         capture=True,
         check=False,
     )
-    status = result.stdout.strip()
-    return status.lower() if status else "not-installed"
+    state = result.stdout.strip()
+    return state.lower() if state else "not-installed"
 
 
 def default_labels() -> str:
@@ -330,7 +344,7 @@ def service_status(service_prefix: str, idx: int, *, runner_dir: Path | None = N
     """Get service status string."""
     if is_windows():
         if runner_dir is not None:
-            return win_service_status(runner_dir)
+            return win_task_status(runner_dir)
         return "unknown"
     if is_linux() or is_macos():
         result = run_cmd(
