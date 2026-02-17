@@ -128,8 +128,8 @@ def run_cmd(
     resolve via PATHEXT.  When check=False, FileNotFoundError is caught and
     returned as a failed CompletedProcess so callers don't need try/except.
     """
-    # Windows needs shell=True for .cmd/.bat wrappers on PATH
-    if is_windows() and not shell and args and not Path(args[0]).suffix:
+    # Windows needs shell=True for .cmd/.bat wrappers and PATHEXT resolution
+    if is_windows() and not shell:
         shell = True
 
     try:

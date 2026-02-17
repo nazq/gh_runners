@@ -10,7 +10,7 @@
 
 Cross-platform GitHub Actions self-hosted runner manager. One CLI to set up, manage, and tear down self-hosted runners across multiple orgs.
 
-Self-hosted runners save real money on your GitHub Actions bill. GitHub-hosted runners charge per-minute and the costs add up fast, especially for Rust/Tauri builds where a single CI run can burn 30-60 minutes of billable time. With `ghr`, you run those same builds on your own hardware at zero marginal cost. A mid-range desktop running 10 parallel runners will pay for itself in weeks if you have active CI.
+Self-hosted runners save real money on your GitHub Actions bill. GitHub-hosted runners charge per-minute and the costs add up fast, especially for Rust/Tauri builds where a single CI run can burn 30-60 minutes of billable time. With `gh-runners`, you run those same builds on your own hardware at zero marginal cost. A mid-range desktop running 10 parallel runners will pay for itself in weeks if you have active CI.
 
 Built primarily for Rust/Tauri/Node CI but works for any workload. Linux and Windows supported. macOS PRs welcome.
 
@@ -24,7 +24,7 @@ uv tool install gh-runners
 pip install gh-runners
 
 # Verify
-ghr --help
+gh-runners --help
 ```
 
 ## Quick Start
@@ -39,13 +39,13 @@ cp config.example.toml config.toml
 # Edit config.toml with your org URL, runner count, etc.
 
 # 2. Check prerequisites
-ghr check-host
+gh-runners check-host
 
 # 3. Install isolated toolchain (keeps runners separate from your dev tools)
-ghr setup-toolchain
+gh-runners setup-toolchain
 
 # 4. Setup runners (auto-fetches token via gh CLI, or pass --token)
-ghr setup
+gh-runners setup
 ```
 
 ### Windows
@@ -58,13 +58,13 @@ copy config.example.toml config.toml
 # Edit config.toml
 
 # 2. Check prerequisites
-ghr check-host
+gh-runners check-host
 
 # 3. Verify globally installed tools match config versions
-ghr setup-toolchain
+gh-runners setup-toolchain
 
 # 4. Setup runners (as Administrator — installs as Windows Services)
-ghr setup --token YOUR_TOKEN
+gh-runners setup --token YOUR_TOKEN
 ```
 
 Runners auto-start on reboot on both platforms.
@@ -75,18 +75,18 @@ All commands support `--org <name>` to target a specific organization.
 
 | Command | Description |
 |---------|-------------|
-| `ghr check-host` | Verify build toolchain prerequisites |
-| `ghr list-packages` | List all available toolchain packages |
-| `ghr setup-toolchain` | Install isolated toolchain (Linux) or verify versions (Windows) |
-| `ghr setup` | Download, configure, install as services |
-| `ghr status` | Show all runner service states and active jobs |
-| `ghr start` | Start all runner services |
-| `ghr stop` | Stop all runner services |
-| `ghr restart` | Wait for jobs, clean work dirs, restart |
-| `ghr restart --force` | Restart immediately (may interrupt jobs) |
-| `ghr clean` | Clean `_work` directories (stop runners first) |
-| `ghr logs <org> <N>` | Show last 50 log lines for runner N |
-| `ghr remove` | Unregister from GitHub, remove services |
+| `gh-runners check-host` | Verify build toolchain prerequisites |
+| `gh-runners list-packages` | List all available toolchain packages |
+| `gh-runners setup-toolchain` | Install isolated toolchain (Linux) or verify versions (Windows) |
+| `gh-runners setup` | Download, configure, install as services |
+| `gh-runners status` | Show all runner service states and active jobs |
+| `gh-runners start` | Start all runner services |
+| `gh-runners stop` | Stop all runner services |
+| `gh-runners restart` | Wait for jobs, clean work dirs, restart |
+| `gh-runners restart --force` | Restart immediately (may interrupt jobs) |
+| `gh-runners clean` | Clean `_work` directories (stop runners first) |
+| `gh-runners logs <org> <N>` | Show last 50 log lines for runner N |
+| `gh-runners remove` | Unregister from GitHub, remove services |
 
 `setup` and `remove` accept an optional `--token TOKEN`. If omitted, a registration token is fetched automatically via the `gh` CLI.
 
@@ -136,7 +136,7 @@ extra_labels = ""
 
 ### Toolchain packages
 
-Each package is a TOML sub-table under `[toolchain]`. The `packages` array controls which ones are installed. Run `ghr list-packages` to see all available packages and their supported architectures.
+Each package is a TOML sub-table under `[toolchain]`. The `packages` array controls which ones are installed. Run `gh-runners list-packages` to see all available packages and their supported architectures.
 
 Built-in packages: `rust`, `node`, `cargo-tools`, `go`, `pnpm`, `bun`.
 
@@ -164,7 +164,7 @@ Runners use an isolated shared toolchain (`~/.gh-runners/shared-toolchain/`) wit
 
 ### Windows
 
-On Windows, `ghr setup-toolchain` verifies that globally installed tool versions match your config. Runners use whatever Rust/Node is on the system PATH. Each runner is a native Windows Service via GitHub's built-in `svc.cmd`.
+On Windows, `gh-runners setup-toolchain` verifies that globally installed tool versions match your config. Runners use whatever Rust/Node is on the system PATH. Each runner is a native Windows Service via GitHub's built-in `svc.cmd`.
 
 ### Platform Detection
 
@@ -178,7 +178,7 @@ Auto-detects OS and CPU architecture:
 
 - Python 3.11+ with uv
 - git, gcc, curl
-- Then run `ghr setup-toolchain` for Rust + Node
+- Then run `gh-runners setup-toolchain` for Rust + Node
 
 ### Windows
 
@@ -188,7 +188,7 @@ Auto-detects OS and CPU architecture:
 - Rust (`winget install Rustlang.Rustup`)
 - Node.js LTS (`winget install OpenJS.NodeJS.LTS`)
 
-Run `ghr check-host` to verify everything is present.
+Run `gh-runners check-host` to verify everything is present.
 
 ## Usage in GitHub Actions
 
@@ -202,7 +202,7 @@ jobs:
 
   # Target a specific runner by its name label
   build-specific:
-    runs-on: [self-hosted, Linux, X64, ghr-myorg-1]
+    runs-on: [self-hosted, Linux, X64, gh-runner-myorg-1]
     steps:
       - uses: actions/checkout@v4
 ```
@@ -214,7 +214,7 @@ just check      # Run all checks (lint + typecheck)
 just lint        # Ruff lint + format check
 just fix         # Auto-fix lint issues and format
 just typecheck   # mypy --strict
-just run status  # Run any ghr command via uv
+just run status  # Run any gh-runners command via uv
 ```
 
 ## Contributing
@@ -277,18 +277,18 @@ That's it. No config schema changes needed — users just add `"deno"` to their 
 ### Runner shows offline in GitHub
 
 ```bash
-ghr status
-ghr logs MyOrg 1
-ghr restart
+gh-runners status
+gh-runners logs MyOrg 1
+gh-runners restart
 ```
 
 ### Registration token expired
 
-Tokens expire after 1 hour. If you have `gh` CLI authenticated, `ghr setup` and `ghr remove` fetch tokens automatically. Otherwise:
+Tokens expire after 1 hour. If you have `gh` CLI authenticated, `gh-runners setup` and `gh-runners remove` fetch tokens automatically. Otherwise:
 
 ```bash
 gh api -X POST orgs/YOUR_ORG/actions/runners/registration-token --jq .token
-ghr setup --token TOKEN
+gh-runners setup --token TOKEN
 ```
 
 ### Disk space
@@ -296,14 +296,14 @@ ghr setup --token TOKEN
 Rust `target/` dirs and `node_modules` grow fast:
 
 ```bash
-ghr stop
-ghr clean
-ghr start
+gh-runners stop
+gh-runners clean
+gh-runners start
 ```
 
 ### Re-register runners
 
 ```bash
-ghr remove
-ghr setup
+gh-runners remove
+gh-runners setup
 ```

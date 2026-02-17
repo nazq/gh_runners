@@ -257,7 +257,9 @@ def cmd_check_host(package_names: list[str] | None = None) -> None:
             _print_linux_fix_hints(package_names)
         sys.exit(1)
     else:
-        print("\n  All required tools present. Ready for: ghr setup --token TOKEN")
+        print(
+            "\n  All required tools present. Ready for: gh-runners setup --token TOKEN"
+        )
 
 
 def _load_package_names_from_config() -> list[str]:
@@ -301,4 +303,6 @@ def _print_linux_fix_hints(package_names: list[str]) -> None:
 
     print("\n  Quick install commands:")
     print(f"    sudo apt install {' '.join(apt_pkgs)}  # or equivalent for your distro")
-    print("    ghr setup-toolchain     # installs configured packages in isolation")
+    print(
+        "    gh-runners setup-toolchain     # installs configured packages in isolation"
+    )
