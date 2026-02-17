@@ -351,9 +351,17 @@ def _install_pwsh(tc_dir: Path, arch: str, cfg: dict[str, Any]) -> None:
         else:
             print(f"  pwsh: installing {version} via winget...")
         run_cmd(
-            ["winget", "install", "--id", "Microsoft.PowerShell",
-             "--version", version, "--accept-source-agreements",
-             "--accept-package-agreements", "--silent"],
+            [
+                "winget",
+                "install",
+                "--id",
+                "Microsoft.PowerShell",
+                "--version",
+                version,
+                "--accept-source-agreements",
+                "--accept-package-agreements",
+                "--silent",
+            ],
             check=False,
         )
         print(f"  pwsh: {version} ready")
@@ -380,6 +388,7 @@ def _install_pwsh(tc_dir: Path, arch: str, cfg: dict[str, Any]) -> None:
 
         if pwsh_dir.exists():
             import shutil
+
             shutil.rmtree(pwsh_dir)
         pwsh_dir.mkdir(parents=True)
 

@@ -340,7 +340,9 @@ def stop_service(service_prefix: str, idx: int) -> None:
     )
 
 
-def service_status(service_prefix: str, idx: int, *, runner_dir: Path | None = None) -> str:
+def service_status(
+    service_prefix: str, idx: int, *, runner_dir: Path | None = None
+) -> str:
     """Get service status string."""
     if is_windows():
         if runner_dir is not None:
