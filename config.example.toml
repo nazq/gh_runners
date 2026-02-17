@@ -1,0 +1,66 @@
+# GitHub Actions Self-Hosted Runner Manager Configuration
+# Copy this to config.toml and fill in your values.
+#
+# This config supports multiple GitHub organizations.
+# Each [[org]] block defines runners for one org.
+
+[runner_version]
+# GitHub Actions runner version
+# Check latest at: https://github.com/actions/runner/releases
+version = "2.331.0"
+
+[timeouts]
+# Max seconds to wait for active jobs before restart (default: 1 hour)
+job_wait_seconds = 3600
+
+# Seconds between job completion checks during wait
+poll_interval = 10
+
+# ── Linux-only: Shared Toolchain ─────────────────────────────────
+# On Linux, runners use an isolated toolchain so they don't conflict
+# with your personal dev tools. Windows users install tools globally.
+#
+# Each package gets its own sub-table for version + any extra config.
+# Available packages: rust, node, cargo-tools, go, pnpm, bun
+# Run `ghr list-packages` to see all available packages.
+
+[toolchain]
+packages = ["rust", "node", "cargo-tools"]
+
+[toolchain.rust]
+version = "1.88.0"
+
+[toolchain.node]
+version = "22.14.0"
+
+[toolchain.cargo-tools]
+# Space-separated cargo crates to install
+crates = "cargo-llvm-cov just tauri-cli"
+
+# ── Uncomment to add more packages ──────────────────────────────
+# [toolchain.go]
+# version = "1.23.6"
+#
+# [toolchain.pnpm]
+# version = "9.15.0"
+#
+# [toolchain.bun]
+# version = "1.2.2"
+
+# ── Organizations ────────────────────────────────────────────────
+# Define one [[org]] block per GitHub organization.
+
+[[org]]
+name = "MyOrg"
+url = "https://github.com/MyOrg"
+runner_group = "Default"
+runner_count = 4
+name_prefix = "runner"
+service_prefix = "gh-runner-myorg"
+
+# Extra labels beyond the automatic: self-hosted, Linux/Windows, X64
+extra_labels = ""
+
+# Base directory for runner installations
+# Defaults to ~/.gh-runners/<org_name> if omitted
+# base_dir = "~/.gh-runners/MyOrg"
