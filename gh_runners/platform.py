@@ -122,18 +122,34 @@ def run_cmd(
     shell: bool = False,
     env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    """Run a subprocess command."""
-    if capture:
+    """Run a subprocess command.
+
+    On Windows, .cmd/.bat scripts (npm, rustup, etc.) need shell=True to
+    resolve via PATHEXT.  When check=False, FileNotFoundError is caught and
+    returned as a failed CompletedProcess so callers don't need try/except.
+    """
+    # Windows needs shell=True for .cmd/.bat wrappers on PATH
+    if is_windows() and not shell and args and not Path(args[0]).suffix:
+        shell = True
+
+    try:
+        if capture:
+            return subprocess.run(
+                args,
+                cwd=cwd,
+                check=check,
+                shell=shell,
+                capture_output=True,
+                text=True,
+                env=env,
+            )
         return subprocess.run(
-            args,
-            cwd=cwd,
-            check=check,
-            shell=shell,
-            capture_output=True,
-            text=True,
-            env=env,
+            args, cwd=cwd, check=check, shell=shell, text=True, env=env
         )
-    return subprocess.run(args, cwd=cwd, check=check, shell=shell, text=True, env=env)
+    except FileNotFoundError:
+        if check:
+            raise
+        return subprocess.CompletedProcess(args, returncode=127, stdout="", stderr="")
 
 
 def run_powershell(
