@@ -1,6 +1,6 @@
 [project]
 name = "gh-runners"
-version = "1.0.0"
+version = "1.0.1"
 description = "GitHub Actions self-hosted runner manager for Linux, Windows, and more"
 requires-python = ">=3.11"
 license = "MIT"
