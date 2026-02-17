@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import platform
 import struct
@@ -77,10 +78,84 @@ def run_script(runner_dir: Path) -> str:
 
 
 def svc_script(runner_dir: Path) -> str:
-    """Get the service management script for this platform."""
-    if is_windows():
-        return str(runner_dir / "svc.cmd")
+    """Get the service management script for this platform (Linux/macOS only)."""
     return str(runner_dir / "svc.sh")
+
+
+# ---------------------------------------------------------------------------
+# Windows service helpers  (replaces the removed svc.cmd)
+# ---------------------------------------------------------------------------
+
+
+def win_service_name(runner_dir: Path) -> str | None:
+    """Derive the Windows service name from the runner's .runner config.
+
+    The runner agent writes *agentName* and *gitHubUrl* into ``.runner``.
+    The service name follows the convention used by ``config.cmd --runasservice``:
+    ``actions.runner.<OrgOrOwner-Repo>.<agentName>``
+    """
+    runner_file = runner_dir / ".runner"
+    if not runner_file.exists():
+        return None
+    try:
+        data = json.loads(runner_file.read_text(encoding="utf-8-sig"))
+    except (json.JSONDecodeError, OSError):
+        return None
+    agent_name: str = data.get("agentName", "")
+    github_url: str = data.get("gitHubUrl", "")
+    if not agent_name or not github_url:
+        return None
+    # https://github.com/Org -> ["https:", "", "github.com", "Org"]
+    # https://github.com/Org/Repo -> [..., "Org", "Repo"]
+    parts = github_url.rstrip("/").split("/")
+    if len(parts) >= 5:
+        slug = f"{parts[3]}-{parts[4]}"
+    elif len(parts) >= 4:
+        slug = parts[3]
+    else:
+        return None
+    return f"actions.runner.{slug}.{agent_name}"
+
+
+def win_start_service(runner_dir: Path) -> None:
+    """Start a GitHub Actions runner Windows service."""
+    svc = win_service_name(runner_dir)
+    if not svc:
+        print(f"  WARNING: Cannot determine service name for {runner_dir}")
+        return
+    run_cmd(["sc.exe", "start", svc], check=False)
+
+
+def win_stop_service(runner_dir: Path) -> None:
+    """Stop a GitHub Actions runner Windows service."""
+    svc = win_service_name(runner_dir)
+    if not svc:
+        print(f"  WARNING: Cannot determine service name for {runner_dir}")
+        return
+    run_cmd(["sc.exe", "stop", svc], check=False)
+
+
+def win_delete_service(runner_dir: Path) -> None:
+    """Delete (uninstall) a GitHub Actions runner Windows service."""
+    svc = win_service_name(runner_dir)
+    if not svc:
+        print(f"  WARNING: Cannot determine service name for {runner_dir}")
+        return
+    run_cmd(["sc.exe", "delete", svc], check=False)
+
+
+def win_service_status(runner_dir: Path) -> str:
+    """Query the status of a runner Windows service."""
+    svc = win_service_name(runner_dir)
+    if not svc:
+        return "unknown"
+    result = run_powershell(
+        f"(Get-Service -Name '{svc}' -ErrorAction SilentlyContinue).Status",
+        capture=True,
+        check=False,
+    )
+    status = result.stdout.strip()
+    return status.lower() if status else "not-installed"
 
 
 def default_labels() -> str:
@@ -232,9 +307,8 @@ WantedBy=default.target
 
 
 def start_service(service_prefix: str, idx: int) -> None:
-    """Start a runner service."""
+    """Start a runner service (Linux/macOS only — see win_start_service for Windows)."""
     if is_windows():
-        # Handled via svc.cmd in the caller
         return
     run_cmd(
         ["systemctl", "--user", "start", systemd_service_name(service_prefix, idx)],
@@ -243,7 +317,7 @@ def start_service(service_prefix: str, idx: int) -> None:
 
 
 def stop_service(service_prefix: str, idx: int) -> None:
-    """Stop a runner service."""
+    """Stop a runner service (Linux/macOS only — see win_stop_service for Windows)."""
     if is_windows():
         return
     run_cmd(
@@ -252,8 +326,12 @@ def stop_service(service_prefix: str, idx: int) -> None:
     )
 
 
-def service_status(service_prefix: str, idx: int) -> str:
+def service_status(service_prefix: str, idx: int, *, runner_dir: Path | None = None) -> str:
     """Get service status string."""
+    if is_windows():
+        if runner_dir is not None:
+            return win_service_status(runner_dir)
+        return "unknown"
     if is_linux() or is_macos():
         result = run_cmd(
             [

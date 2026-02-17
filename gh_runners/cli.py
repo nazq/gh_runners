@@ -27,8 +27,10 @@ from gh_runners.platform import (
     service_status,
     start_service,
     stop_service,
-    svc_script,
     uninstall_systemd_service,
+    win_delete_service,
+    win_start_service,
+    win_stop_service,
 )
 
 app = typer.Typer(
@@ -346,14 +348,17 @@ def setup(token: Token = None, org: Org = None) -> None:
             if o.runner_group and o.runner_group != "Default":
                 config_args.extend(["--runnergroup", o.runner_group])
 
+            # On Windows, --runasservice makes config.cmd also install the
+            # Windows service in one step (replaces the old svc.cmd workflow).
+            if is_windows():
+                config_args.append("--runasservice")
+
             print("  Configuring...")
             run_cmd(config_args, cwd=rdir)
 
             if is_windows():
-                print("  Installing Windows Service...")
-                run_cmd([svc_script(rdir), "install"], cwd=rdir)
-                print("  Starting service...")
-                run_cmd([svc_script(rdir), "start"], cwd=rdir)
+                print("  Starting Windows Service...")
+                win_start_service(rdir)
             print(f"  {name} configured.")
 
         # Linux: install systemd services for this org
@@ -392,7 +397,7 @@ def start(org: Org = None) -> None:
                 print(f"  {name}: not set up, skipping")
                 continue
             if is_windows():
-                run_cmd([svc_script(rdir), "start"], cwd=rdir, check=False)
+                win_start_service(rdir)
             else:
                 start_service(o.service_prefix, i)
             print(f"  {name}: started")
@@ -415,7 +420,7 @@ def stop(org: Org = None) -> None:
                 print(f"  {name}: not set up, skipping")
                 continue
             if is_windows():
-                run_cmd([svc_script(rdir), "stop"], cwd=rdir, check=False)
+                win_stop_service(rdir)
             else:
                 stop_service(o.service_prefix, i)
             print(f"  {name}: stopped")
@@ -449,7 +454,7 @@ def restart(
             if not rdir.exists():
                 continue
             if is_windows():
-                run_cmd([svc_script(rdir), "stop"], cwd=rdir, check=False)
+                win_stop_service(rdir)
             else:
                 stop_service(o.service_prefix, i)
 
@@ -463,7 +468,7 @@ def restart(
             if not rdir.exists():
                 continue
             if is_windows():
-                run_cmd([svc_script(rdir), "start"], cwd=rdir, check=False)
+                win_start_service(rdir)
             else:
                 start_service(o.service_prefix, i)
 
@@ -486,13 +491,7 @@ def status(org: Org = None) -> None:
             if not rdir.exists():
                 svc_status = "not set up"
             elif is_windows():
-                svc = f"actions.runner.{name}"
-                result = run_powershell(
-                    f"(Get-Service -Name '{svc}' -ErrorAction SilentlyContinue).Status",
-                    capture=True,
-                    check=False,
-                )
-                svc_status = result.stdout.strip() or "not installed"
+                svc_status = service_status(o.service_prefix, i, runner_dir=rdir)
             else:
                 svc_status = service_status(o.service_prefix, i)
 
@@ -559,9 +558,9 @@ def remove(token: Token = None, org: Org = None) -> None:
 
             if is_windows():
                 print("  Stopping service...")
-                run_cmd([svc_script(rdir), "stop"], cwd=rdir, check=False)
+                win_stop_service(rdir)
                 print("  Uninstalling service...")
-                run_cmd([svc_script(rdir), "uninstall"], cwd=rdir, check=False)
+                win_delete_service(rdir)
 
             print("  Unregistering from GitHub...")
             run_cmd(
