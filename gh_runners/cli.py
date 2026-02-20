@@ -285,6 +285,22 @@ def setup_toolchain() -> None:
 
 
 @app.command()
+def check_toolchain(
+    fix: Annotated[
+        bool, typer.Option("--fix", help="Automatically fix corrupted toolchains.")
+    ] = False,
+) -> None:
+    """Validate shared toolchain integrity (Linux).
+
+    Detects corruption from dtolnay/rust-toolchain where cargo goes
+    missing from the stable toolchain.  Use --fix to auto-repair.
+    """
+    from gh_runners.check_toolchain import cmd_check_toolchain
+
+    cmd_check_toolchain(fix=fix)
+
+
+@app.command()
 def setup(
     token: Token = None,
     org: Org = None,
