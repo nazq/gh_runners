@@ -7,6 +7,7 @@ installed tool versions match what config.toml expects.
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -78,6 +79,50 @@ def toolchain_env(tc_dir: Path) -> dict[str, str]:
     return env
 
 
+# Artifact Registry hosts that CI pulls container images from. Written
+# into each runner's isolated Docker config so `container:` job images —
+# which are pulled before any workflow step runs, and so cannot use a
+# step-level auth action — resolve via the runner's own gcloud.
+_DOCKER_CRED_HELPERS = {
+    "us-central1-docker.pkg.dev": "gcloud",
+    "us-docker.pkg.dev": "gcloud",
+}
+
+
+def _write_cloud_config(rdir: Path) -> tuple[Path, Path]:
+    """Create per-runner gcloud and Docker config dirs.
+
+    Both default to paths under ``$HOME``, which on a self-hosted runner is
+    the *operator's* home directory. A workflow that authenticates to GCP
+    then rewrites the operator's active gcloud account to a short-lived
+    Workload Identity credential, which dies when the job ends — leaving
+    every subsequent `gcloud` and `docker pull` on the host broken until
+    someone re-runs `gcloud auth login`. Isolating both per runner keeps
+    CI credentials out of the operator's config entirely.
+
+    Returns the (gcloud, docker) directories.
+    """
+    gcloud_dir = rdir / ".gcloud"
+    docker_dir = rdir / ".docker"
+
+    (gcloud_dir / "configurations").mkdir(parents=True, exist_ok=True)
+    docker_dir.mkdir(parents=True, exist_ok=True)
+
+    # Seed a default gcloud configuration so the first CI invocation does
+    # not have to create one (and so usage reporting stays off).
+    config_default = gcloud_dir / "configurations" / "config_default"
+    if not config_default.exists():
+        config_default.write_text("[core]\ndisable_usage_reporting = True\n")
+
+    # Docker config is rewritten every time: the credHelpers map is
+    # generated state, not user state, and must track this dict.
+    (docker_dir / "config.json").write_text(
+        json.dumps({"credHelpers": _DOCKER_CRED_HELPERS}, indent=2) + "\n"
+    )
+
+    return gcloud_dir, docker_dir
+
+
 def write_runner_env(org: OrgConfig, tc_dir: Path) -> None:
     """Write .env and .path files for each runner in an org."""
     env = toolchain_env(tc_dir)
@@ -91,13 +136,19 @@ def write_runner_env(org: OrgConfig, tc_dir: Path) -> None:
             f"TEMP={tmpdir}",
         ]
     )
-    env_contents = "\n".join(env_lines)
     path_contents = env["PATH"]
 
     for i in range(1, org.runner_count + 1):
         rdir = org.runner_dir(i)
         if rdir.exists():
-            (rdir / ".env").write_text(env_contents + "\n")
+            gcloud_dir, docker_dir = _write_cloud_config(rdir)
+            # Per-runner, matching CARGO_HOME above — concurrent jobs on
+            # different runners must not race on a shared credential store.
+            runner_lines = env_lines + [
+                f"CLOUDSDK_CONFIG={gcloud_dir}",
+                f"DOCKER_CONFIG={docker_dir}",
+            ]
+            (rdir / ".env").write_text("\n".join(runner_lines) + "\n")
             (rdir / ".path").write_text(path_contents + "\n")
 
 
