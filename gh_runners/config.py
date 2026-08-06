@@ -21,12 +21,22 @@ class OrgConfig:
     service_prefix: str
     extra_labels: str = ""
     base_dir: str = ""
+    # Dedicated unprivileged account these runners execute as. Empty means
+    # the legacy model: they run as whoever invoked the tool, with no
+    # isolation from the operator's SSH keys, cloud credentials or Docker
+    # socket. See docs/runner-isolation.md.
+    runner_user: str = ""
 
     def runner_name(self, idx: int) -> str:
         return f"{self.name_prefix}-{idx}"
 
     def runner_dir(self, idx: int) -> Path:
         return Path(self.base_dir) / f"runner-{idx}"
+
+    @property
+    def isolated(self) -> bool:
+        """True when these runners have their own account."""
+        return bool(self.runner_user)
 
 
 @dataclass
@@ -53,6 +63,12 @@ class Config:
     runner_version: str = "2.322.0"
     job_wait_seconds: int = 3600
     poll_interval: int = 10
+    # Where runner homes physically live. This is bind-mounted to
+    # /srv/gh-runners because the fast volume sits inside the operator's
+    # home, and a home directory is drwxr-x--- — no runner user can traverse
+    # into it whatever the ownership below. Empty means "no bind mount":
+    # homes are created directly under /srv/gh-runners.
+    runner_home_real: str = ""
     toolchain: ToolchainConfig = field(default_factory=ToolchainConfig)
     orgs: list[OrgConfig] = field(default_factory=list)
 
@@ -110,6 +126,7 @@ def load_config(config_path: Path | None = None) -> Config:
                 service_prefix=org_raw["service_prefix"],
                 extra_labels=org_raw.get("extra_labels", ""),
                 base_dir=base_dir,
+                runner_user=str(org_raw.get("runner_user", "")),
             )
         )
 
@@ -119,11 +136,13 @@ def load_config(config_path: Path | None = None) -> Config:
 
     timeouts = raw.get("timeouts", {})
     runner_ver = raw.get("runner_version", {})
+    paths = raw.get("paths", {})
 
     return Config(
         runner_version=runner_ver.get("version", "2.322.0"),
         job_wait_seconds=timeouts.get("job_wait_seconds", 3600),
         poll_interval=timeouts.get("poll_interval", 10),
+        runner_home_real=paths.get("runner_home_real", ""),
         toolchain=toolchain,
         orgs=orgs,
     )
