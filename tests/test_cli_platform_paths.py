@@ -33,7 +33,10 @@ service_prefix = "gh-runner-test"
 def legacy_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """An org with no runner_user: runners execute as whoever ran the tool."""
     p = tmp_path / "legacy.toml"
-    p.write_text(LEGACY_CONFIG + f'base_dir = "{tmp_path / "runners"}"\n')
+    # A TOML *literal* string (single quotes) so a Windows path is not read
+    # as escape sequences: "C:\Users\..." is an invalid \U escape and fails
+    # to parse at all.
+    p.write_text(LEGACY_CONFIG + f"base_dir = '{tmp_path / 'runners'}'\n")
     monkeypatch.setattr("gh_runners.config._find_config", lambda: p)
     return p
 
@@ -58,7 +61,18 @@ def present(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 class TestLegacyOrgs:
-    """No dedicated account: everything runs as the invoking user."""
+    """No dedicated account: everything runs as the invoking user.
+
+    Linux-specific: the legacy model uses the caller's own systemd manager,
+    and on Windows these same commands drive scheduled tasks instead — which
+    TestWindowsCommands covers.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _linux_only(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        for mod in ("gh_runners.cli", "gh_runners.platform"):
+            monkeypatch.setattr(f"{mod}.is_windows", lambda: False, raising=False)
+            monkeypatch.setattr(f"{mod}.is_linux", lambda: True, raising=False)
 
     def test_status_uses_systemd_directly(
         self, fake_run: FakeRun, legacy_config: Path, present: None

@@ -76,10 +76,14 @@ class TestRunnerArchive:
 
 class TestScriptPaths:
     def test_linux_scripts_have_sh_suffix(self) -> None:
+        # Assert the filename, not the joined string: Path joins with a
+        # backslash on Windows, so comparing the whole path would fail there
+        # for a reason that has nothing to do with the behaviour under test.
         d = Path("/srv/runner-1")
-        assert plat.config_script(d) == "/srv/runner-1/config.sh"
-        assert plat.run_script(d) == "/srv/runner-1/run.sh"
-        assert plat.svc_script(d) == "/srv/runner-1/svc.sh"
+        assert plat.config_script(d).endswith("config.sh")
+        assert plat.run_script(d).endswith("run.sh")
+        assert plat.svc_script(d).endswith("svc.sh")
+        assert str(d) in plat.config_script(d)
 
 
 class TestServiceNaming:
