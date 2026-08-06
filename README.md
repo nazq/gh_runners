@@ -1,7 +1,9 @@
 # gh-runners
 
 [![CI](https://github.com/nazq/gh_runners/actions/workflows/ci.yml/badge.svg)](https://github.com/nazq/gh_runners/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/nazq/gh_runners/branch/main/graph/badge.svg)](https://codecov.io/gh/nazq/gh_runners)
 [![PyPI](https://img.shields.io/pypi/v/gh-runners?color=blue)](https://pypi.org/project/gh-runners/)
+[![Downloads](https://img.shields.io/pypi/dm/gh-runners?color=blue)](https://pypi.org/project/gh-runners/)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-3776ab?logo=python&logoColor=white)](https://python.org)
 [![Typed: mypy strict](https://img.shields.io/badge/typed-mypy%20strict-1674b1?logo=python&logoColor=white)](https://mypy-lang.org)
 [![Linted: ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
@@ -13,6 +15,20 @@ Cross-platform GitHub Actions self-hosted runner manager. One CLI to set up, man
 Self-hosted runners save real money on your GitHub Actions bill. GitHub-hosted runners charge per-minute and the costs add up fast, especially for Rust/Tauri builds where a single CI run can burn 30-60 minutes of billable time. With `gh-runners`, you run those same builds on your own hardware at zero marginal cost. A mid-range desktop running 10 parallel runners will pay for itself in weeks if you have active CI.
 
 Built primarily for Rust/Tauri/Node CI but works for any workload. Linux and Windows supported. macOS PRs welcome.
+
+> **Security note.** Set `runner_user` on each org (Linux). That gives the
+> runners a dedicated unprivileged account with its own home, and runs
+> containers under rootless Podman instead of a root Docker daemon — so a
+> workflow cannot read your `~/.ssh` keys or reach a Docker socket, and a
+> pull request that triggers CI cannot walk out with your credentials.
+>
+> Leave `runner_user` unset and the runners execute as *whoever ran the
+> tool*. Such a runner can read anything you can and, if you are in the
+> `docker` group, obtain root. That is only appropriate when every workflow
+> able to run on it is one you already trust.
+>
+> [docs/runner-isolation.md](docs/runner-isolation.md) documents the design
+> with measured evidence and re-runnable probes.
 
 ## Install
 
@@ -146,21 +162,47 @@ Built-in packages: `rust`, `node`, `cargo-tools`, `go`, `pnpm`, `bun`.
 
 ### Linux: Toolchain Isolation
 
-Runners use an isolated shared toolchain (`~/.gh-runners/shared-toolchain/`) with their own `RUSTUP_HOME`, `CARGO_HOME`, and Node.js — completely separate from your personal `~/.cargo` and `~/.nvm`. The systemd service files load each runner's `.env` file via `EnvironmentFile=` so runners never see your dev tools.
+Runners share one toolchain at `/opt/gh-runners/toolchain` with its own
+`RUSTUP_HOME` and Node.js, separate from your personal `~/.cargo` and
+`~/.nvm`. It lives outside any home directory because a home is
+`drwxr-x---`, and a runner user cannot traverse into one however the
+toolchain itself is owned. Each systemd unit loads that runner's `.env` via
+`EnvironmentFile=`, so runners never see your dev tools.
+
+`RUSTUP_HOME` is shared — rustup only reads from it during a build.
+**Everything a build writes to is per-runner**: `CARGO_HOME`, the npm, uv,
+pip, pnpm and Go caches, plus `CLOUDSDK_CONFIG` and `DOCKER_CONFIG`. A
+shared `CARGO_HOME` fails outright (`failed to create directory
+<CARGO_HOME>/git/db/<dep>`), and a shared cloud config is how
+`google-github-actions/auth` ends up overwriting your active `gcloud`
+account with a credential that dies when the job does.
+
+With `runner_user` set, each org's runners also get their own unprivileged
+account, so a workflow cannot read your files at all. See
+[docs/runner-isolation.md](docs/runner-isolation.md) for that design and the
+evidence behind it.
+
+With `runner_user` set (the isolated layout):
 
 ```
-~/.gh-runners/
-├── shared-toolchain/    # Isolated Rust + Node + whatever you configure
-│   ├── .rustup/
-│   ├── .cargo/
-│   └── node/
-├── MyOrg/
-│   ├── runner-1/        # Runner installation + _work/
-│   ├── runner-2/
-│   └── ...
-└── AnotherOrg/
-    └── ...
+/opt/gh-runners/toolchain/     # root:root 0755 — readable by every runner
+├── .rustup/                   #   shared: rustup only reads it at build time
+├── .cargo/bin/                #   binaries on PATH; CARGO_HOME is elsewhere
+└── node/
+
+/srv/gh-runners/               # root:root 0755 — each runner owns its subtree
+└── ghr-myorg/                 # drwx------ ghr-myorg
+    └── MyOrg/
+        ├── runner-1/          # installation + _work/
+        │   ├── .env           # per-runner CARGO_HOME, caches, cloud config
+        │   ├── .cargo/        # written to by builds, so never shared
+        │   ├── .gcloud/
+        │   └── .docker/
+        └── runner-2/
 ```
+
+Without `runner_user`, everything lives under `~/.gh-runners/` owned by you,
+and the toolchain falls back to `~/.gh-runners/shared-toolchain/`.
 
 ### Windows
 
@@ -210,16 +252,37 @@ jobs:
 ## Development
 
 ```bash
-just check      # Run all checks (lint + typecheck)
+just check       # Everything CI runs: lint + typecheck + tests
 just lint        # Ruff lint + format check
 just fix         # Auto-fix lint issues and format
 just typecheck   # mypy --strict
+just test        # pytest with the 95% coverage gate
+just test-fast   # pytest without coverage — faster inner loop
+just coverage    # HTML coverage report
 just run status  # Run any gh-runners command via uv
 ```
 
+### Testing
+
+**No test touches the real system.** This tool creates user accounts, edits
+`/etc/fstab` and `/etc/subuid`, and runs `userdel -r` — a suite that could
+execute any of that for real would be more dangerous than no suite.
+
+Every subprocess goes through `platform.run_cmd`, so the `fake_run` fixture
+severs all of them at once, and an autouse backstop fails any test that
+reaches `subprocess` directly. Filesystem writes take an explicit path, so
+`tmp_path` covers the rest. If you add a call site that bypasses `run_cmd`,
+a test will tell you rather than your machine finding out.
+
+Coverage must stay at or above 95% (`fail_under` in `pyproject.toml`, plus
+the Codecov project and patch gates). Platform-specific branches are *not*
+excluded from that number — the suite stubs `is_windows`/`is_linux` so both
+halves are reachable from any host.
+
 ## Contributing
 
-PRs welcome, especially for macOS support. Run `just check` before submitting — it must pass clean.
+PRs welcome, especially for macOS support. Run `just check` before
+submitting — lint, types and the coverage gate must all pass clean.
 
 ### Adding a new package
 
