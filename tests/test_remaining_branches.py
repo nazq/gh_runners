@@ -25,6 +25,7 @@ class TestOptionalOrgConfig:
         fake_run: FakeRun,
         config_file: Path,
         tmp_path: Path,
+        fake_uid: None,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Custom labels are how a workflow targets a subset of runners —
@@ -35,6 +36,7 @@ class TestOptionalOrgConfig:
         cfg = load_config(config_file)
         cfg.orgs[0].extra_labels = "gpu,cuda"
         cfg.orgs[0].base_dir = str(tmp_path / "r")
+        fake_run.when("test -e", returncode=1)
         monkeypatch.setattr("gh_runners.cli.load_config", lambda: cfg)
         monkeypatch.setattr("gh_runners.reconcile.observe", lambda *a, **k: Report())
         monkeypatch.setattr(cli, "_fetch_token_via_gh", lambda url: "TOKEN")
@@ -42,7 +44,17 @@ class TestOptionalOrgConfig:
         archive.write_bytes(b"")
         monkeypatch.setattr(cli, "_download_runner", lambda c: archive)
         monkeypatch.setattr(
+            cli,
+            "_extract_runner_as",
+            lambda u, a, d: d.mkdir(parents=True, exist_ok=True),
+        )
+        monkeypatch.setattr(
             cli, "_extract_runner", lambda a, d: d.mkdir(parents=True, exist_ok=True)
+        )
+        monkeypatch.setattr(
+            cli,
+            "_extract_runner_as",
+            lambda u, a, d: d.mkdir(parents=True, exist_ok=True),
         )
         monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "h"))
         (tmp_path / "h" / ".config" / "systemd" / "user").mkdir(parents=True)
@@ -56,12 +68,17 @@ class TestOptionalOrgConfig:
         fake_run: FakeRun,
         config_file: Path,
         tmp_path: Path,
+        fake_uid: None,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Only when it differs from Default — passing --runnergroup Default
         is rejected by some org configurations."""
         from gh_runners.config import load_config
         from gh_runners.reconcile import Report
+
+        # Nothing configured yet: exists_as asks the runner `test -e`, and
+        # FakeRun's default exit 0 would read as "already set up".
+        fake_run.when("test -e", returncode=1)
 
         cfg = load_config(config_file)
         cfg.orgs[0].runner_group = "gpu-pool"
@@ -74,6 +91,11 @@ class TestOptionalOrgConfig:
         monkeypatch.setattr(cli, "_download_runner", lambda c: archive)
         monkeypatch.setattr(
             cli, "_extract_runner", lambda a, d: d.mkdir(parents=True, exist_ok=True)
+        )
+        monkeypatch.setattr(
+            cli,
+            "_extract_runner_as",
+            lambda u, a, d: d.mkdir(parents=True, exist_ok=True),
         )
         monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "h"))
         (tmp_path / "h" / ".config" / "systemd" / "user").mkdir(parents=True)

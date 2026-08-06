@@ -231,6 +231,45 @@ def priv_systemctl_user(user: str, *args: str) -> subprocess.CompletedProcess[st
     return systemctl_user(user, *args)
 
 
+def priv_as_user(
+    user: str,
+    argv: list[str],
+    *,
+    check: bool = True,
+    cwd: Path | None = None,
+) -> subprocess.CompletedProcess[str]:
+    from gh_runners.privilege import as_user
+
+    return as_user(user, argv, check=check, cwd=cwd)
+
+
+def priv_exists_as(user: str, path: Path) -> bool:
+    from gh_runners.privilege import exists_as
+
+    return exists_as(user, path)
+
+
+def priv_mkdir_as(user: str, path: Path) -> None:
+    """Create a directory owned by ``user``, parents included."""
+    from gh_runners.privilege import as_user
+
+    as_user(user, ["mkdir", "-p", str(path)], check=False)
+
+
+def _extract_runner_as(user: str, archive_path: Path, dest: Path) -> None:
+    """Extract the runner tarball as ``user``.
+
+    Python's tarfile would write as the operator, who cannot enter the
+    home; extracting as root instead leaves root-owned files the runner
+    cannot delete — which is how 195,761 root-owned paths once broke every
+    job on this host.
+    """
+    as_user_cmd = ["tar", "xzf", str(archive_path), "-C", str(dest)]
+    from gh_runners.privilege import as_user
+
+    as_user(user, as_user_cmd, check=False)
+
+
 def _get_active_runners(cfg: Config, org_name: str | None) -> list[str]:
     active: list[str] = []
     for org in _select_orgs(cfg, org_name):
@@ -581,7 +620,14 @@ def setup(
 
     for o in orgs:
         base = Path(o.base_dir)
-        base.mkdir(parents=True, exist_ok=True)
+        # Everything below a runner's home is created *as that runner*.
+        # A home is drwx------, so the operator cannot mkdir into it — and
+        # doing this as root instead would leave root-owned files the runner
+        # cannot remove, the exact failure this isolation exists to prevent.
+        if o.isolated and is_linux():
+            priv_mkdir_as(o.runner_user, base)
+        else:
+            base.mkdir(parents=True, exist_ok=True)
 
         # Resolve token per-org (gh CLI generates org-specific tokens)
         org_token = _resolve_token(token, o)
@@ -597,13 +643,31 @@ def setup(
             print(f"\n--- {name} ---")
 
             run_script = rdir / ("run.cmd" if is_windows() else "run.sh")
-            if not run_script.exists():
+            isolated = o.isolated and is_linux()
+            # Asking as the operator answers False for anything inside a
+            # drwx------ home, which reads as "not extracted" and would
+            # re-extract over a working runner on every setup.
+            have_run = (
+                priv_exists_as(o.runner_user, run_script)
+                if isolated
+                else run_script.exists()
+            )
+            if not have_run:
                 print("  Extracting runner...")
-                _extract_runner(archive_path, rdir)
+                if isolated:
+                    priv_mkdir_as(o.runner_user, rdir)
+                    _extract_runner_as(o.runner_user, archive_path, rdir)
+                else:
+                    _extract_runner(archive_path, rdir)
             else:
                 print("  Runner files already extracted.")
 
-            if (rdir / ".runner").exists():
+            configured = (
+                priv_exists_as(o.runner_user, rdir / ".runner")
+                if isolated
+                else (rdir / ".runner").exists()
+            )
+            if configured:
                 print("  Already configured. Use 'remove' first to reconfigure.")
                 continue
 
@@ -630,7 +694,13 @@ def setup(
                 config_args.extend(["--runnergroup", o.runner_group])
 
             print("  Configuring...")
-            result = run_cmd(config_args, cwd=rdir, check=False)
+            # config.sh writes .runner, .credentials and _work into the home.
+            # Run as the operator and it fails; as root and every file it
+            # creates is root-owned.
+            if isolated:
+                result = priv_as_user(o.runner_user, config_args, check=False, cwd=rdir)
+            else:
+                result = run_cmd(config_args, cwd=rdir, check=False)
 
             if result.returncode != 0:
                 print(f"  ERROR: Configuration failed (exit code {result.returncode}).")

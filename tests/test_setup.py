@@ -137,6 +137,16 @@ class TestSetupToolchain:
 
 
 class TestSetup:
+    @pytest.fixture(autouse=True)
+    def _fresh_host(self, fake_run: FakeRun) -> None:
+        """Nothing is installed or configured yet.
+
+        exists_as asks the runner `test -e`; FakeRun's default exit 0 means
+        "it exists", so every runner reads as already configured and setup
+        skips the work under test.
+        """
+        fake_run.when("test -e", returncode=1)
+
     def test_provisions_the_host_before_installing(
         self,
         fake_run: FakeRun,
@@ -159,6 +169,10 @@ class TestSetup:
         )
         monkeypatch.setattr(
             cli, "_extract_runner", lambda a, d: order.append("extract")
+        )
+        # Isolated orgs extract as the runner, not as the operator.
+        monkeypatch.setattr(
+            cli, "_extract_runner_as", lambda u, a, d: order.append("extract")
         )
         result = runner.invoke(cli.app, ["setup"])
         assert result.exit_code == 0
@@ -188,7 +202,12 @@ class TestSetup:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Re-registering would churn the GitHub-side runner for no reason."""
+        # Isolated runners are probed as their owner, not by the operator:
+        # a drwx------ home answers False to Path.exists() regardless.
         monkeypatch.setattr(Path, "exists", lambda self: True)
+        # Overrides the class fixture: this host *is* already configured.
+        fake_run._rules.clear()
+        fake_run.when("test -e", returncode=0)
         result = runner.invoke(cli.app, ["setup"])
         assert "Already configured" in result.stdout
         assert not any("--unattended" in ln for ln in fake_run.command_lines)

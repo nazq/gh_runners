@@ -97,15 +97,22 @@ def as_user(
     *,
     check: bool = True,
     capture: bool = False,
+    cwd: Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run a command as ``user``.
 
     Sets ``$HOME``, ``XDG_RUNTIME_DIR`` and ``DBUS_SESSION_BUS_ADDRESS`` so
     that systemd ``--user`` and podman both work, and starts from ``/`` so
     the caller's CWD cannot make the command fail.
+
+    ``cwd`` is entered by the target user rather than passed to sudo: the
+    operator often cannot even traverse into a runner's home, so setting it
+    on the outer process fails before sudo runs. config.sh needs this — it
+    resolves its own directory from the working directory.
     """
     uid = _uid(user)
-    inner = f"cd / && {shlex.join(argv)}"
+    where = shlex.quote(str(cwd)) if cwd is not None else "/"
+    inner = f"cd {where} && {shlex.join(argv)}"
     return run_cmd(
         [
             "sudo",

@@ -110,6 +110,10 @@ class TestDownloadOnWindows:
         """Windows has no curl in a default install."""
         cfg.orgs[0].base_dir = str(tmp_path / "org")
         monkeypatch.setattr("gh_runners.cli.is_windows", lambda: True)
+        # The cache lives under the toolchain root on Linux only; on Windows
+        # it is the working directory, so both predicates must agree.
+        monkeypatch.setattr("gh_runners.cli.is_linux", lambda: False)
+        monkeypatch.chdir(tmp_path)
         recorded: list[str] = []
         monkeypatch.setattr(
             "gh_runners.cli.run_powershell",
