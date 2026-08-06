@@ -22,3 +22,10 @@ runner-*/
 
 # Plans
 /plans/
+
+# Coverage artifacts
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.pytest_cache/
