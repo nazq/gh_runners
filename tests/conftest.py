@@ -137,11 +137,16 @@ def fake_subprocess_run(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]
 
 @pytest.fixture(autouse=True)
 def _no_real_subprocess(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Backstop: fail loudly if anything reaches the real subprocess module.
+    """Backstop: fail loudly if one of *our* modules bypasses the seam.
 
     `fake_run` covers the intended seam. This catches a new call site added
     later that bypasses it — the failure surfaces as a clear error in the
     test that introduced it, rather than as a mutated developer machine.
+
+    Scoped to this package's modules rather than patching subprocess
+    globally. The standard library shells out on its own account — on
+    Windows `platform.win32_ver()` runs `ver` — and a global patch turns
+    those into failures that say nothing about our code.
     """
 
     def _boom(*args: object, **kwargs: object) -> None:
@@ -150,10 +155,19 @@ def _no_real_subprocess(monkeypatch: pytest.MonkeyPatch) -> None:
             "Use the fake_run fixture, or extend it if this is a new seam."
         )
 
-    monkeypatch.setattr(subprocess, "run", _boom)
-    monkeypatch.setattr(subprocess, "Popen", _boom)
-    monkeypatch.setattr(subprocess, "call", _boom, raising=False)
-    monkeypatch.setattr(subprocess, "check_output", _boom, raising=False)
+    class _Guard:
+        """Stands in for the subprocess module inside our own namespaces."""
+
+        run = staticmethod(_boom)
+        Popen = staticmethod(_boom)
+        call = staticmethod(_boom)
+        check_output = staticmethod(_boom)
+        DEVNULL = subprocess.DEVNULL
+        PIPE = subprocess.PIPE
+        CompletedProcess = subprocess.CompletedProcess
+
+    for mod in ("gh_runners.platform", "gh_runners.privilege"):
+        monkeypatch.setattr(f"{mod}.subprocess", _Guard, raising=False)
 
 
 @pytest.fixture
