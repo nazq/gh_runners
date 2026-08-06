@@ -122,3 +122,71 @@ class TestCanPrompt:
 class TestLevels:
     def test_levels_are_distinct(self) -> None:
         assert len({esc.Level.OPERATOR, esc.Level.ROOT, esc.Level.RUNNER}) == 3
+
+
+class TestIsRoot:
+    def test_true_at_euid_zero(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("os.geteuid", lambda: 0, raising=False)
+        assert esc.is_root() is True
+
+    def test_false_otherwise(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("os.geteuid", lambda: 1000, raising=False)
+        assert esc.is_root() is False
+
+
+class TestRootShortCircuit:
+    """Being root is checked before asking sudo anything.
+
+    Under `Defaults targetpw` or `rootpw`, sudo validates against a
+    different account's password and can answer "no" to a process that is
+    already root — so the probe must never be the first question.
+    """
+
+    def test_root_skips_the_probe_entirely(
+        self, fake_run: FakeRun, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(esc, "is_root", lambda: True)
+        assert esc.have_root_now() is True
+        assert not fake_run.ran("sudo")
+
+    def test_root_never_prompts(
+        self, fake_run: FakeRun, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(esc, "is_root", lambda: True)
+        esc.ensure_root("testing")
+        assert not fake_run.ran("sudo -v")
+
+
+class TestProbeIsOnlyAHint:
+    """`sudo -n -v` answers a different question than the one we ask.
+
+    It reports whether the credential *timestamp* is valid. With a
+    per-command NOPASSWD rule and no cached timestamp it exits 1 while the
+    real privileged command succeeds — verified against both sudo.ws 1.9.17
+    and sudo-rs 0.2.8 on the target host. Treating that as "must prompt"
+    asks for a password nobody needed, so False must mean "unknown".
+    """
+
+    def test_a_refused_probe_does_not_assert_a_prompt_is_needed(
+        self, fake_run: FakeRun, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(esc, "is_root", lambda: False)
+        fake_run.when("sudo -n -v", returncode=1)
+        # The contract is only that we do not claim root is available; the
+        # real operation's exit code remains the authority.
+        assert esc.have_root_now() is False
+
+    def test_never_matches_on_stderr_text(
+        self, fake_run: FakeRun, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The two implementations word this differently: "a password is
+        required" vs "interactive authentication is required"."""
+        monkeypatch.setattr(esc, "is_root", lambda: False)
+        for message in (
+            "sudo: a password is required",
+            "sudo-rs: interactive authentication is required",
+        ):
+            esc.reset_cache()
+            fake_run._rules.clear()
+            fake_run.when("sudo -n -v", returncode=0, stderr=message)
+            assert esc.have_root_now() is True, "exit code must win over text"

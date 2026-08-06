@@ -29,23 +29,38 @@ root's environment, PATH, and credential stores whether it wanted them or
 not. Escalating per operation keeps the operator's context available for
 the parts that need it.
 
-**sudo-rs.** Ubuntu 25.10+ ships ``sudo-rs`` as the default ``sudo``, and
-this host runs 0.2.8. It is not flag-compatible with the original:
+**Both sudo implementations.** Ubuntu 25.10+ ships ``sudo-rs`` as the
+default ``sudo`` while the original remains installed, so this must work on
+either without knowing which it got. Only flags common to both are used —
+``-n``, ``-v``, ``-u``, ``-H``, ``-S`` — and every one was verified against
+both binaries on the target host rather than taken from documentation.
 
-* ``-E`` prints a warning to stderr and is *ignored* — it does not fail.
-* ``--preserve-env=LIST`` is also ignored on this version, which is the
-  trap: upstream supports it, so it reads like a safe replacement for
-  ``-E``. Anything the child needs must be passed explicitly.
-* ``-A``/``SUDO_ASKPASS`` is rejected outright (``invalid option
-  provided``); askpass only arrived in 0.2.11. There is no askpass fallback
-  to build here.
+The exit codes agree on all of them. What differs is the *text*: the
+original says ``a password is required`` where sudo-rs says ``interactive
+authentication is required``, and their "unknown user" messages differ too.
+Nothing here matches on stderr; branching on it would work on one
+implementation and silently misbehave on the other.
 
-Because of this, nothing below relies on inherited environment. Every value
-a privileged child needs is passed as an argument.
+Two further traps, both specific to sudo-rs 0.2.8:
+
+* ``-E`` prints a warning and is *ignored* rather than failing, and
+  ``--preserve-env=LIST`` is ignored too — the more dangerous of the pair,
+  since upstream supports it and it therefore reads like a safe
+  replacement.
+* ``-A``/``SUDO_ASKPASS`` is rejected outright; askpass arrived in 0.2.11.
+
+So nothing below relies on inherited environment: every value a privileged
+child needs is passed as an argument, which is the portable posture anyway.
+
+Also note the two implementations keep *separate* timestamp directories
+(``/run/sudo/ts`` and ``/run/sudo-rs/ts``). Probing with one binary and
+executing with the other compares nothing, so always invoke plain ``sudo``
+and let PATH resolve it — never a hardcoded path to either.
 """
 
 from __future__ import annotations
 
+import os
 import sys
 from enum import Enum
 
@@ -74,17 +89,42 @@ class EscalationError(RuntimeError):
 _validated = False
 
 
-def have_root_now() -> bool:
-    """True if a privileged command would run without prompting.
+def is_root() -> bool:
+    """True when already running with effective uid 0.
 
-    Probing with ``sudo -n -v`` rather than checking euid: the tool may be
-    invoked by an operator who has a passwordless rule, has authenticated
-    recently, or is already root. All three should proceed silently, and
-    only the exit code distinguishes them reliably — sudo-rs's diagnostics
-    differ from upstream's, so matching on message text is not portable.
+    Checked before any probe: as root there is nothing to escalate, and
+    asking sudo about it is both pointless and — under ``targetpw`` or
+    ``rootpw`` — capable of answering "no".
+    """
+    return getattr(os, "geteuid", lambda: 1)() == 0
+
+
+def have_root_now() -> bool:
+    """True if a privileged command is known to run without prompting.
+
+    This is a *hint*, and deliberately one-directional: True means go ahead,
+    False means "unknown", never "will definitely prompt".
+
+    ``sudo -n -v`` asks whether the credential timestamp is valid. That is
+    not the question we care about, and on this host the two answers differ:
+    with a per-command ``NOPASSWD`` rule and no cached timestamp, ``-n -v``
+    exits 1 while the actual privileged command runs fine. Treating that as
+    "must prompt" would ask for a password nobody needed.
+
+    ``sudo -n -l CMD`` is the usual suggested fix, and it is worse here: it
+    reports what the *policy* permits, so on this host it exits 0 for a
+    target user whose real ``sudo -n -u`` still exits 1. A false positive
+    skips the prompt and lets the operation fail instead.
+
+    So neither probe is authoritative. The reliable signal is the exit code
+    of the real operation, which the callers in :mod:`gh_runners.privilege`
+    already surface — this only avoids prompting when we can cheaply prove
+    a prompt is unnecessary.
     """
     if is_windows():
         return False
+    if is_root():
+        return True
     return run_cmd(["sudo", "-n", "-v"], check=False, capture=True).returncode == 0
 
 
