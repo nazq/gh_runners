@@ -372,14 +372,16 @@ def list_packages() -> None:
         if configured is None and pkg.default_version:
             ver += " (default)"
 
-        # Extra versions are installed alongside the primary one, so a table
-        # showing only the primary understates what is on the host: `rust`
-        # read "1.97" while 1.92.0 was equally present and equally usable.
-        extra = [str(v) for v in pkg_cfg.get("extra_versions", [])]
-        if extra:
-            ver += f" +{','.join(extra)}"
-
         print(f"  {pkg.name:<16} {archs:<20} {ver:<18} {pkg.description}")
+
+        # One line per installed version. Extra toolchains are separately
+        # installed and separately usable — a repo pins 1.92.0 and gets
+        # exactly that — so folding them into the primary's cell ("1.97
+        # +1.92.0") reads as a footnote rather than as the equal citizen it
+        # is. Anything scanning the version column should see them too.
+        for v in (str(x) for x in pkg_cfg.get("extra_versions", [])):
+            print(f"  {'':<16} {'':<20} {v:<18} (extra)")
+
         if arch not in pkg.supported_archs and pkg.manual_msg:
             print(f"  {'':>16} ^ {ok}: {pkg.manual_msg}")
 

@@ -216,6 +216,7 @@ packages = ["rust"]
 [toolchain.rust]
 version = "1.97"
 components = ["clippy"]
+extra_versions = ["1.92.0"]
 
 [[org]]
 name = "TestOrg"

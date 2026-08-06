@@ -298,6 +298,16 @@ class TestListPackagesVersions:
         result = runner.invoke(cli.app, ["list-packages"])
         assert "(default)" in result.stdout
 
+    def test_gives_each_extra_version_its_own_line(self, fake_run: FakeRun) -> None:
+        """An extra toolchain is separately installed and separately usable
+        — a repo pins 1.92.0 and gets exactly that. Folding it into the
+        primary's cell reads as a footnote rather than an equal citizen."""
+        result = runner.invoke(cli.app, ["list-packages"])
+        lines = [ln for ln in result.stdout.splitlines() if "1.92.0" in ln]
+        assert len(lines) == 1, "extra version must have its own row"
+        assert "1.97" not in lines[0], "must not share a row with the primary"
+        assert "(extra)" in lines[0]
+
     def test_names_the_packages_this_host_enables(self, fake_run: FakeRun) -> None:
         result = runner.invoke(cli.app, ["list-packages"])
         assert "Enabled for this host" in result.stdout
