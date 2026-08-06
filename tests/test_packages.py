@@ -267,12 +267,27 @@ class TestInstallNode:
         pkgs._install_node(tmp_path, "x64", {"version": "22.14.0"})
         assert pkgs.node_home(tmp_path).is_symlink()
 
+    def test_a_non_zip_download_is_reported_not_raised(
+        self, fake_run: FakeRun, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A wrong URL used to surface as a BadZipFile traceback from deep
+        in the stdlib, naming neither fnm nor the URL."""
+        archive = tmp_path / "fnm.zip"
+        archive.write_text("Not Found")
+        pkgs._install_node(tmp_path, "x64", {"version": "22.14.0"})
+        assert "not a zip archive" in capsys.readouterr().out
+
     def test_fetches_fnm_when_absent(
         self, fake_run: FakeRun, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(pkgs.zipfile, "ZipFile", lambda *a, **k: _NullZip())
         pkgs._install_node(tmp_path, "x64", {"version": "22.14.0"})
-        assert any("fnm-linux-x64.zip" in ln for ln in fake_run.command_lines)
+        # Verified against the v1.39.0 release: only x64 carries the
+        # platform in its name, so deriving all three uniformly 404s.
+        assert any("fnm-linux.zip" in ln for ln in fake_run.command_lines)
+        assert any("--fail" in ln for ln in fake_run.command_lines), (
+            "without --fail curl writes the error page and exits 0"
+        )
 
 
 class _NullZip:

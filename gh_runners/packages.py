@@ -19,7 +19,7 @@ from pathlib import Path
 from collections.abc import Callable
 from typing import Any, Protocol
 
-from gh_runners.platform import detect_arch, run_cmd
+from gh_runners.platform import detect_arch, is_windows, run_cmd
 
 
 class InstallFn(Protocol):
@@ -285,24 +285,48 @@ def _ensure_fnm(tc_dir: Path, arch: str, env: dict[str, str]) -> Path | None:
     if fnm.exists():
         return fnm
 
-    fnm_arch = {"x64": "x64", "arm64": "arm64", "arm": "arm32"}.get(arch, "x64")
-    url = (
-        "https://github.com/Schniz/fnm/releases/latest/download/"
-        f"fnm-linux-{fnm_arch}.zip"
+    # Release asset names, verified against the v1.39.0 release. Only the
+    # x64 build carries the platform in its name; the ARM ones are bare
+    # (`fnm-arm64.zip`), so deriving them uniformly gets a 404.
+    asset = {"x64": "fnm-linux", "arm64": "fnm-arm64", "arm": "fnm-arm32"}.get(
+        arch, "fnm-linux"
     )
-    print(f"  node: fetching fnm ({fnm_arch})...")
+    if is_windows():
+        asset = "fnm-windows"
+    url = f"https://github.com/Schniz/fnm/releases/latest/download/{asset}.zip"
+
+    print(f"  node: fetching fnm ({asset})...")
     fnm.parent.mkdir(parents=True, exist_ok=True)
     archive = tc_dir / "fnm.zip"
-    if run_cmd(["curl", "-sSL", "-o", str(archive), url], check=False).returncode != 0:
-        print("  node: FAILED to download fnm")
+    # --fail matters: without it curl writes the server's error page to the
+    # output file and exits 0, so a wrong URL reaches zipfile as a
+    # BadZipFile traceback instead of a message naming the download.
+    result = run_cmd(
+        ["curl", "-sSL", "--fail", "-o", str(archive), url],
+        check=False,
+        capture=True,
+    )
+    if result.returncode != 0:
+        print(f"  node: FAILED to download fnm from {url}")
+        archive.unlink(missing_ok=True)
         return None
 
-    with zipfile.ZipFile(archive) as zf:
-        zf.extractall(fnm.parent)
-    archive.unlink(missing_ok=True)
-    if not fnm.exists():
-        print("  node: fnm archive did not contain the expected binary")
+    try:
+        with zipfile.ZipFile(archive) as zf:
+            zf.extractall(fnm.parent)
+    except zipfile.BadZipFile:
+        print(f"  node: fnm download from {url} was not a zip archive")
+        archive.unlink(missing_ok=True)
         return None
+    archive.unlink(missing_ok=True)
+
+    # The archive holds a bare `fnm`; older ones nested it in a directory.
+    if not fnm.exists():
+        found = next((p for p in fnm.parent.rglob("fnm") if p.is_file()), None)
+        if found is None:
+            print("  node: fnm archive did not contain the expected binary")
+            return None
+        found.replace(fnm)
     fnm.chmod(0o755)
     return fnm
 
