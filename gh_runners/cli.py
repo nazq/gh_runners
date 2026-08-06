@@ -165,6 +165,17 @@ def _extract_runner(archive_path: Path, dest: Path) -> None:
             tf.extractall(dest, filter="data")
 
 
+def _is_root() -> bool:
+    """True when running with effective uid 0.
+
+    ``os.geteuid`` does not exist on Windows, so calling it there raises
+    AttributeError rather than returning anything. Every caller wants the
+    same answer on Windows — elevation is checked via require_admin instead —
+    so this returns False rather than making each site remember the guard.
+    """
+    return getattr(os, "geteuid", lambda: 1)() == 0
+
+
 def priv_systemctl_user(user: str, *args: str) -> subprocess.CompletedProcess[str]:
     from gh_runners.privilege import systemctl_user
 
@@ -706,7 +717,7 @@ def status(org: Org = None) -> None:
         # GitHub instead of reporting a state we cannot observe.
         gh_state = (
             _github_runner_state(o)
-            if o.runner_user and os.geteuid() != 0 and not is_windows()
+            if o.runner_user and not is_windows() and not _is_root()
             else {}
         )
 
@@ -733,7 +744,7 @@ def status(org: Org = None) -> None:
                 svc_status = "not set up"
             elif is_windows():
                 svc_status = service_status(o.service_prefix, i, runner_dir=rdir)
-            elif o.runner_user and os.geteuid() != 0:
+            elif o.runner_user and not is_windows() and not _is_root():
                 # Isolated runners live in another user's systemd manager. A
                 # bare `systemctl --user` would query the operator's, find no
                 # such unit, and report every healthy runner as "inactive" —

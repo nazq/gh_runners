@@ -17,12 +17,28 @@ from tests.conftest import FakeRun
 
 
 class TestToolchainDir:
-    def test_defaults_outside_any_home(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_prefers_the_shared_location_when_it_exists(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """A toolchain under the operator's home is unreachable by the runner
         user: a home is drwxr-x---, so traversal fails however the toolchain
         itself is owned."""
         monkeypatch.delenv(tc._TOOLCHAIN_ENV_VAR, raising=False)
+        monkeypatch.setattr(
+            tc._SHARED_TOOLCHAIN_DIR.__class__, "is_dir", lambda self: True
+        )
         assert tc.toolchain_dir() == Path("/opt/gh-runners/toolchain")
+
+    def test_falls_back_when_the_shared_location_is_absent(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Creating /opt needs root, so a fresh unprivileged install keeps
+        working rather than failing on a directory it cannot create."""
+        monkeypatch.delenv(tc._TOOLCHAIN_ENV_VAR, raising=False)
+        monkeypatch.setattr(
+            tc._SHARED_TOOLCHAIN_DIR.__class__, "is_dir", lambda self: False
+        )
+        assert tc.toolchain_dir() == Path.home() / ".gh-runners" / "shared-toolchain"
 
     def test_environment_override_wins(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv(tc._TOOLCHAIN_ENV_VAR, "/custom/tc")

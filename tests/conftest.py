@@ -213,12 +213,18 @@ def fake_uid(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture
 def as_root(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("os.geteuid", lambda: 0)
+    """Patch the predicate, not os.geteuid.
+
+    geteuid does not exist on Windows, so patching it there would create an
+    attribute the production code is careful never to call — testing a path
+    that cannot happen.
+    """
+    monkeypatch.setattr("gh_runners.cli._is_root", lambda: True)
 
 
 @pytest.fixture
 def as_operator(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("os.geteuid", lambda: 1000)
+    monkeypatch.setattr("gh_runners.cli._is_root", lambda: False)
 
 
 @pytest.fixture(autouse=True)
