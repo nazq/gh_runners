@@ -276,3 +276,43 @@ class TestSetupTokenError:
 
     def test_optional_resolver_prefers_an_explicit_token(self, org: Any) -> None:
         assert cli._resolve_token_optional("explicit", org) == "explicit"
+
+
+class TestListPackagesVersions:
+    """The table must show what this host installs, not the registry default.
+
+    With `version = "1.97"` configured, it advertised rust 1.86.0 — the
+    built-in fallback — and pnpm 9.15.0 against 10.13.1 actually installed.
+    Both readings are wrong in the same way: a default is only meaningful
+    when nothing overrides it.
+    """
+
+    def test_shows_the_configured_version(self, fake_run: FakeRun) -> None:
+        result = runner.invoke(cli.app, ["list-packages"])
+        assert result.exit_code == 0
+        assert "1.97" in result.stdout, "config value must win"
+        assert "1.86.0" not in result.stdout, "registry default must not appear"
+
+    def test_marks_unconfigured_packages_as_defaults(self, fake_run: FakeRun) -> None:
+        """An unconfigured package is a suggestion, not what is installed."""
+        result = runner.invoke(cli.app, ["list-packages"])
+        assert "(default)" in result.stdout
+
+    def test_names_the_packages_this_host_enables(self, fake_run: FakeRun) -> None:
+        result = runner.invoke(cli.app, ["list-packages"])
+        assert "Enabled for this host" in result.stdout
+        assert "rust" in result.stdout
+
+    def test_works_without_a_config(
+        self, fake_run: FakeRun, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """It is a reference command: it must answer on a fresh machine that
+        has no config.toml yet, falling back to registry defaults."""
+
+        def _boom() -> Path:
+            raise OSError("no config")
+
+        monkeypatch.setattr("gh_runners.config._find_config", _boom)
+        result = runner.invoke(cli.app, ["list-packages"])
+        assert result.exit_code == 0
+        assert "rust" in result.stdout

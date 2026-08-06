@@ -345,16 +345,39 @@ def list_packages() -> None:
     from gh_runners.platform import detect_arch
 
     arch = detect_arch()
+
+    # Show what this host would actually install, not the registry fallback.
+    # Printing the built-in default beside a config that overrides it states
+    # a version nothing uses: with `version = "1.97"` configured, the table
+    # advertised rust 1.86.0, and pnpm read 9.15.0 against 10.13.1 installed.
+    try:
+        toolchain = load_config().toolchain
+    except (OSError, SystemExit, typer.Exit):
+        # `list-packages` is a reference command and must work anywhere,
+        # including a machine with no config.toml yet.
+        toolchain = None
+
     print(f"Available toolchain packages (arch: {arch}):\n")
-    print(f"  {'Package':<16} {'Arch Support':<20} {'Default Ver':<14} {'Description'}")
-    print(f"  {'-' * 80}")
+    print(f"  {'Package':<16} {'Arch Support':<20} {'Version':<18} {'Description'}")
+    print(f"  {'-' * 84}")
     for pkg in _list_packages():
         archs = ", ".join(sorted(pkg.supported_archs))
         ok = "yes" if arch in pkg.supported_archs else "MANUAL"
-        ver = pkg.default_version or "-"
-        print(f"  {pkg.name:<16} {archs:<20} {ver:<14} {pkg.description}")
+
+        configured = toolchain.pkg_cfg(pkg.name).get("version") if toolchain else None
+        ver = str(configured or pkg.default_version or "-")
+        # A configured package is what this host installs; an unconfigured
+        # one is only a suggestion, and conflating them is the whole bug.
+        if configured is None and pkg.default_version:
+            ver += " (default)"
+
+        print(f"  {pkg.name:<16} {archs:<20} {ver:<18} {pkg.description}")
         if arch not in pkg.supported_archs and pkg.manual_msg:
             print(f"  {'':>16} ^ {ok}: {pkg.manual_msg}")
+
+    if toolchain:
+        enabled = ", ".join(toolchain.packages) or "none"
+        print(f"\n  Enabled for this host: {enabled}")
     print("\nAdd packages to config.toml under [toolchain] packages = [...]")
 
 
