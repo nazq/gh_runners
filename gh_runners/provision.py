@@ -11,6 +11,9 @@ Each function is idempotent and returns whether it changed anything, so
 
 from __future__ import annotations
 
+import re
+import time
+
 from pathlib import Path
 
 from gh_runners import privilege as priv
@@ -172,6 +175,15 @@ def remove_user(org: OrgConfig, *, purge_home: bool = True) -> bool:
     The inverse of :func:`ensure_user`. Lingering must be disabled first —
     it keeps the user's systemd manager alive, and ``userdel`` refuses while
     any process belongs to the account.
+
+    Returns True only when the account is actually gone. An earlier version
+    returned True unconditionally and printed "account, home and subuid
+    entries removed" directly beneath ``userdel``'s own "user ghr-peg is
+    currently used by process 1022151" — the worst failure a teardown tool
+    can have, since the operator then trusts a state that does not exist.
+
+    Raises :class:`RemovalError` when the account survives, rather than
+    reporting a half-removal as success.
     """
     if not org.isolated or not priv.user_exists(org.runner_user):
         return False
@@ -181,18 +193,62 @@ def remove_user(org: OrgConfig, *, purge_home: bool = True) -> bool:
     priv.as_root(["loginctl", "terminate-user", u], check=False)
     priv.as_root(["pkill", "-u", u], check=False)
 
+    # loginctl and pkill are asynchronous: they ask processes to exit and
+    # return immediately. userdel then finds them still alive and refuses.
+    # Wait for the account to be genuinely idle before deleting it.
+    if not _wait_until_no_processes(u):
+        raise RemovalError(
+            f"{u} still has running processes after {_KILL_TIMEOUT}s; "
+            "refusing to delete the account. Stop them and re-run."
+        )
+
     args = ["userdel"]
     if purge_home:
         args.append("-r")
     args.append(u)
-    priv.as_root(args, check=False)
+    result = priv.as_root(args, check=False, capture=True)
 
-    # userdel leaves /etc/subuid and /etc/subgid entries behind. Stale ranges
-    # accumulate and can eventually collide with a later account.
+    # `userdel -r` exits 12 when the account went but its home did not — the
+    # account is gone, which is what the caller asked for, so this is not a
+    # failure. Anything else that leaves the user present is.
+    if priv.user_exists(u):
+        detail = (result.stderr or result.stdout or "").strip().splitlines()
+        raise RemovalError(
+            f"userdel failed for {u}: {detail[-1] if detail else 'unknown error'}"
+        )
+
+    # Only now is it safe to drop the subuid ranges. Removing them while the
+    # account survives leaves it unable to run rootless podman at all —
+    # strictly worse than either fully present or fully gone.
+    #
+    # The name is anchored and escaped: a runner_user containing a regex
+    # metacharacter would otherwise delete lines belonging to other accounts.
     for f in ("/etc/subuid", "/etc/subgid"):
-        priv.as_root(["sed", "-i", f"/^{u}:/d", f], check=False)
+        priv.as_root(["sed", "-i", f"/^{re.escape(u)}:/d", f], check=False)
 
     return True
+
+
+class RemovalError(RuntimeError):
+    """Teardown could not complete. The host is in a known, stated state."""
+
+
+_KILL_TIMEOUT = 15
+
+
+def _wait_until_no_processes(user: str, timeout: int | None = None) -> bool:
+    """Poll until ``user`` owns no processes, or the timeout expires.
+
+    Read at call time, not bound as a parameter default: a default is
+    evaluated once at definition, so a test patching _KILL_TIMEOUT would
+    silently wait the full fifteen seconds instead.
+    """
+    deadline = time.monotonic() + (_KILL_TIMEOUT if timeout is None else timeout)
+    while time.monotonic() < deadline:
+        if priv.as_root(["pgrep", "-u", user], check=False).returncode != 0:
+            return True
+        time.sleep(0.5)
+    return priv.as_root(["pgrep", "-u", user], check=False).returncode != 0
 
 
 def remove_bind_mount(real: Path, mount: Path) -> bool:

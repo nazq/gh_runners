@@ -224,8 +224,35 @@ class TestEnsurePodman:
 class TestRemoveUser:
     """The destructive path. `userdel -r` deletes a home directory."""
 
+    @pytest.fixture(autouse=True)
+    def _removal_succeeds(
+        self, fake_run: FakeRun, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Model the account actually going away.
+
+        pgrep exits 1 when the user owns nothing — FakeRun returns 0 by
+        default, which reads as "still running" and stalls every removal
+        until the kill timeout. And user_exists must flip to False after
+        userdel, or the post-delete verification correctly reports that a
+        user which never disappeared was not deleted.
+        """
+        fake_run.when("pgrep -u", returncode=1)
+        deleted: list[str] = []
+
+        def _exists(u: str) -> bool:
+            return u not in deleted
+
+        def _record(argv: list[str]) -> bool:
+            # as_root prefixes sudo, so userdel is not argv[0].
+            if "userdel" in argv:
+                deleted.append(argv[-1])
+            return False
+
+        monkeypatch.setattr("gh_runners.privilege.user_exists", _exists)
+        fake_run.when(_record)
+
     def test_stops_the_manager_before_deleting(
-        self, fake_run: FakeRun, org: Any, existing_user: None
+        self, fake_run: FakeRun, org: Any
     ) -> None:
         """userdel refuses while any process belongs to the account, and
         lingering keeps the manager alive."""
@@ -235,22 +262,16 @@ class TestRemoveUser:
         delete = next(i for i, ln in enumerate(lines) if "userdel" in ln)
         assert linger < delete
 
-    def test_purges_the_home_by_default(
-        self, fake_run: FakeRun, org: Any, existing_user: None
-    ) -> None:
+    def test_purges_the_home_by_default(self, fake_run: FakeRun, org: Any) -> None:
         provision.remove_user(org)
         assert fake_run.ran("userdel -r ghr-test")
 
-    def test_can_keep_the_home(
-        self, fake_run: FakeRun, org: Any, existing_user: None
-    ) -> None:
+    def test_can_keep_the_home(self, fake_run: FakeRun, org: Any) -> None:
         provision.remove_user(org, purge_home=False)
         assert fake_run.ran("userdel ghr-test")
         assert not fake_run.ran("userdel -r")
 
-    def test_clears_subordinate_id_ranges(
-        self, fake_run: FakeRun, org: Any, existing_user: None
-    ) -> None:
+    def test_clears_subordinate_id_ranges(self, fake_run: FakeRun, org: Any) -> None:
         """userdel leaves /etc/subuid and /etc/subgid entries behind; stale
         ranges accumulate and can eventually collide with a later account."""
         provision.remove_user(org)
@@ -302,3 +323,80 @@ class TestRemoveBindMount:
             provision.remove_bind_mount(Path("/mnt/real"), Path("/srv/gh-runners"))
             is False
         )
+
+
+class TestRemoveUserFailureReporting:
+    """A teardown tool must never claim to have removed something it did not.
+
+    The live run printed "ghr-peg: account, home and subuid entries removed"
+    on the line directly after userdel's own "user ghr-peg is currently used
+    by process 1022151", and then deleted the subuid ranges of an account
+    that still existed — leaving it unable to run rootless podman at all.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _user_exists(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("gh_runners.privilege.user_exists", lambda u: True)
+
+    def test_raises_when_processes_will_not_die(
+        self, fake_run: FakeRun, org: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(provision, "_KILL_TIMEOUT", 0)
+        fake_run.when("pgrep -u", returncode=0)  # still running
+        with pytest.raises(provision.RemovalError, match="running processes"):
+            provision.remove_user(org)
+
+    def test_does_not_delete_subuid_when_the_account_survives(
+        self, fake_run: FakeRun, org: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The worst of the three: an account with no subuid range cannot
+        run rootless podman, so a half-purge is worse than none."""
+        monkeypatch.setattr(provision, "_KILL_TIMEOUT", 0)
+        fake_run.when("pgrep -u", returncode=0)
+        with pytest.raises(provision.RemovalError):
+            provision.remove_user(org)
+        assert not fake_run.ran("/etc/subuid")
+        assert not fake_run.ran("/etc/subgid")
+
+    def test_raises_when_userdel_leaves_the_account_behind(
+        self, fake_run: FakeRun, org: Any
+    ) -> None:
+        """user_exists stays True, i.e. userdel did not take."""
+        fake_run.when("pgrep -u", returncode=1)
+        with pytest.raises(provision.RemovalError, match="userdel failed"):
+            provision.remove_user(org)
+
+    def test_waits_for_processes_rather_than_racing_userdel(
+        self, fake_run: FakeRun, org: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """loginctl and pkill are asynchronous: they ask processes to exit
+        and return immediately, so userdel found them still alive."""
+        monkeypatch.setattr(provision, "_KILL_TIMEOUT", 0)
+        fake_run.when("pgrep -u", returncode=0)
+        with pytest.raises(provision.RemovalError):
+            provision.remove_user(org)
+        assert fake_run.ran("pgrep -u"), "must check before deleting"
+        assert not fake_run.ran("userdel")
+
+
+class TestSubuidEscaping:
+    def test_escapes_the_username_in_the_sed_script(
+        self, fake_run: FakeRun, org: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The name is interpolated into a sed address run as root against
+        /etc/subuid: a metacharacter would match other accounts' lines."""
+        deleted: list[str] = []
+        monkeypatch.setattr(
+            "gh_runners.privilege.user_exists", lambda u: u not in deleted
+        )
+
+        def _record(argv: list[str]) -> bool:
+            if "userdel" in argv:
+                deleted.append(argv[-1])
+            return False
+
+        fake_run.when(_record)
+        fake_run.when("pgrep -u", returncode=1)
+        org.runner_user = "ghr.peg"
+        provision.remove_user(org)
+        assert fake_run.ran(r"/^ghr\.peg:/d"), "the dot must be escaped"

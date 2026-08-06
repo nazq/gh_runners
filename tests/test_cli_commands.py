@@ -178,7 +178,23 @@ class TestRemove:
         fake_uid: None,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        monkeypatch.setattr("gh_runners.privilege.user_exists", lambda u: True)
+        # The account exists until userdel runs, then does not: remove_user
+        # verifies the deletion and reports a survivor as a failure.
+        deleted: list[str] = []
+        monkeypatch.setattr(
+            "gh_runners.privilege.user_exists", lambda u: u not in deleted
+        )
+
+        def _record(argv: list[str]) -> bool:
+            if "userdel" in argv:
+                deleted.append(argv[-1])
+            return False
+
+        fake_run.when(_record)
+        # pgrep exits 1 when the account owns nothing; FakeRun's default 0
+        # reads as "still running" and stalls until the kill timeout.
+        fake_run.when("pgrep -u", returncode=1)
+
         runner.invoke(cli.app, ["remove", "--purge"])
         assert any("userdel" in ln for ln in fake_run.command_lines)
 

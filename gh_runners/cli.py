@@ -944,6 +944,8 @@ def remove(
             print(f"  {name} removed.")
 
     if purge and is_linux():
+        # Raises typer.Exit on failure, so the summary below is only ever
+        # printed over a teardown that actually completed.
         _purge_hosts(cfg, org)
 
     print("\nAll runners removed.")
@@ -962,14 +964,26 @@ def _purge_hosts(cfg: Config, org_name: str | None) -> None:
     """Remove the accounts, homes and mount that `setup` provisioned."""
     from gh_runners.provision import (
         RUNNER_HOME_ROOT,
+        RemovalError,
         remove_bind_mount,
         remove_user,
     )
 
     print("\nPurging host provisioning...")
+    failed: list[str] = []
     for o in _select_orgs(cfg, org_name):
-        if remove_user(o):
-            print(f"  {o.runner_user}: account, home and subuid entries removed")
+        try:
+            if remove_user(o):
+                print(f"  {o.runner_user}: account, home and subuid entries removed")
+        except RemovalError as e:
+            # One org failing must not stop the others, but it must not be
+            # mistaken for success either — the previous version printed
+            # "removed" directly beneath userdel's own refusal.
+            print(f"  {o.runner_user}: NOT REMOVED — {e}")
+            failed.append(o.runner_user)
+
+    if failed:
+        raise typer.Exit(1)
 
     # Only drop the shared mount once no org still needs it.
     remaining = [o for o in cfg.orgs if o.isolated and priv_user_exists(o.runner_user)]
