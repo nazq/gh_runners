@@ -422,14 +422,38 @@ def check_services(org: OrgConfig, report: Report) -> None:
             report.add(f"{org.name}/{unit}", State.DRIFT, active or "inactive", start)
 
 
-ALL_CHECKS: tuple[Callable[..., None], ...] = (
-    check_user,
-    check_install,
+# Every check, in dependency order — an account must exist before its podman
+# can work, so a failure early makes later results meaningless.
+#
+# This drives `observe` rather than sitting beside it. The previous version
+# was a parallel list that observe did not consult, and it had already
+# drifted: it omitted check_caches_warm, so a check added to it would have
+# been silently ignored.
+#
+# check_runner_env needs the toolchain directory, which the others do not, so
+# each entry is wrapped to a uniform (org, report) signature at call time.
+def _ignoring_tc_dir(
+    check: Callable[[OrgConfig, Report], None],
+) -> Callable[[OrgConfig, Path, Report], None]:
+    """Adapt a check that does not need the toolchain directory."""
+
+    def wrapped(org: OrgConfig, tc_dir: Path, report: Report) -> None:
+        check(org, report)
+
+    wrapped.__name__ = check.__name__
+    wrapped.__qualname__ = check.__qualname__
+    return wrapped
+
+
+ALL_CHECKS: tuple[Callable[[OrgConfig, Path, Report], None], ...] = (
+    _ignoring_tc_dir(check_user),
+    _ignoring_tc_dir(check_install),
     check_runner_env,
-    check_podman,
-    check_no_root_owned,
-    check_work_writable,
-    check_services,
+    _ignoring_tc_dir(check_podman),
+    _ignoring_tc_dir(check_no_root_owned),
+    _ignoring_tc_dir(check_work_writable),
+    _ignoring_tc_dir(check_caches_warm),
+    _ignoring_tc_dir(check_services),
 )
 
 
@@ -448,14 +472,8 @@ def observe(cfg: Config, tc_dir: Path, org_filter: str | None = None) -> Report:
             continue
         if org.isolated and priv.user_exists(org.runner_user):
             priv.ensure_can_impersonate(org.runner_user)
-        check_user(org, report)
-        check_install(org, report)
-        check_runner_env(org, tc_dir, report)
-        check_podman(org, report)
-        check_no_root_owned(org, report)
-        check_work_writable(org, report)
-        check_caches_warm(org, report)
-        check_services(org, report)
+        for check in ALL_CHECKS:
+            check(org, tc_dir, report)
     return report
 
 

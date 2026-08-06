@@ -310,3 +310,43 @@ class TestApply:
         repaired, skipped = rec.apply(report)
         assert repaired == 0
         assert skipped == 1
+
+
+class TestCheckRegistry:
+    """ALL_CHECKS must drive observe(), not sit beside it.
+
+    The first version was a parallel list observe never consulted, and it had
+    already drifted — it omitted check_caches_warm. A check added to it would
+    have been silently ignored, which is worse than no registry at all.
+    """
+
+    def test_registry_covers_every_check_in_the_module(self) -> None:
+        """The wrappers preserve __name__, so this compares by name."""
+        defined = {
+            name
+            for name in dir(rec)
+            if name.startswith("check_") and callable(getattr(rec, name))
+        }
+        registered = {entry.__name__ for entry in rec.ALL_CHECKS}
+        missing = defined - registered
+        assert not missing, (
+            f"checks defined but not in ALL_CHECKS: {sorted(missing)}. "
+            "observe() iterates the registry, so an unregistered check never runs."
+        )
+
+    def test_observe_runs_every_registered_check(
+        self,
+        fake_run: FakeRun,
+        cfg: Any,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        fake_uid: None,
+    ) -> None:
+        seen: list[int] = []
+        registry = tuple(
+            (lambda org, tc, rep, i=i: seen.append(i))
+            for i in range(len(rec.ALL_CHECKS))
+        )
+        monkeypatch.setattr(rec, "ALL_CHECKS", registry)
+        rec.observe(cfg, tmp_path)
+        assert seen == list(range(len(registry)))
