@@ -96,6 +96,17 @@ def _fetch_token_via_gh(org_url: str) -> str | None:
     return None
 
 
+def _resolve_token_optional(token: str | None, org: OrgConfig) -> str | None:
+    """A registration token, or None if one cannot be obtained.
+
+    For `remove`, a missing token is a degraded mode rather than a failure:
+    the local teardown is the part that matters and it needs no credentials.
+    """
+    if token:
+        return token
+    return _fetch_token_via_gh(org.url)
+
+
 def _resolve_token(token: str | None, org: OrgConfig) -> str:
     if token:
         return token
@@ -107,14 +118,25 @@ def _resolve_token(token: str | None, org: OrgConfig) -> str:
         return fetched
 
     gh_org = gh_org_from_url(org.url) or org.name
-    print(f"\n  ERROR: No registration token for {org.name}.")
-    print("  Provide one of:")
-    print(f"    gh-runners setup --token TOKEN --org {org.name}")
-    print("  Or install gh CLI and authenticate:")
-    print("    gh auth login")
-    print(
-        f"    gh api -X POST orgs/{gh_org}/actions/runners/registration-token --jq .token"
+    mint = (
+        f"gh api -X POST orgs/{gh_org}/actions/runners/registration-token --jq .token"
     )
+    print(f"\n  ERROR: No registration token for {org.name}.")
+
+    # `setup` needs root, but `gh` is authenticated per-user: under sudo it
+    # reads root's empty config and reports "not logged in" while the
+    # operator's own auth is fine. Telling them to `gh auth login` sends them
+    # to fix something that is not broken — mint as themselves instead.
+    if _is_root():
+        print("  Running as root, whose gh CLI is not authenticated.")
+        print("  Mint the token as your own user and pass it in:")
+        print(f'    sudo gh-runners setup --org {org.name} --token "$({mint})"')
+    else:
+        print("  Provide one of:")
+        print(f"    gh-runners setup --token TOKEN --org {org.name}")
+        print("  Or authenticate the gh CLI:")
+        print("    gh auth login")
+        print(f"    {mint}")
     print(f"  Or get one from: {org.url}/settings/actions/runners/new")
     raise typer.Exit(1)
 
@@ -807,8 +829,18 @@ def remove(
         require_admin()
 
     cfg = load_config()
+    orphaned: list[str] = []
     for o in _select_orgs(cfg, org):
-        org_token = _resolve_token(token, o)
+        # A token is only needed to deregister politely with GitHub. Every
+        # other thing `remove` does — stopping services, deleting homes,
+        # accounts, subuid ranges and the mount — is local. Demanding one up
+        # front made teardown impossible exactly when it is most needed: when
+        # GitHub is unreachable, or when running as root, whose `gh` is not
+        # authenticated. Carry on without it and report what was left behind.
+        org_token = _resolve_token_optional(token, o)
+        if org_token is None:
+            print(f"\n  No registration token for {o.name} — removing locally.")
+            print("  Runners will remain listed on GitHub until replaced.")
         print(f"\nRemoving {o.name} runners...")
 
         if is_linux():
@@ -829,12 +861,16 @@ def remove(
                 print("  Removing logon task...")
                 win_delete_task(rdir)
 
-            print("  Unregistering from GitHub...")
-            run_cmd(
-                [config_script(rdir), "remove", "--token", org_token],
-                cwd=rdir,
-                check=False,
-            )
+            if org_token is None:
+                print("  Skipping GitHub unregister (no token).")
+                orphaned.append(name)
+            else:
+                print("  Unregistering from GitHub...")
+                run_cmd(
+                    [config_script(rdir), "remove", "--token", org_token],
+                    cwd=rdir,
+                    check=False,
+                )
 
             print(f"  Removing {rdir}...")
             if o.runner_user:
@@ -853,6 +889,15 @@ def remove(
         _purge_hosts(cfg, org)
 
     print("\nAll runners removed.")
+    if orphaned:
+        # Say this loudly: these registrations still occupy their names, and
+        # `setup` will register alongside them rather than replacing them.
+        print(
+            f"\nWARNING: {len(orphaned)} runner(s) were not deregistered and "
+            "will show as offline on GitHub:"
+        )
+        print(f"  {', '.join(orphaned)}")
+        print("  Remove them at the org's Actions > Runners settings page.")
 
 
 def _purge_hosts(cfg: Config, org_name: str | None) -> None:

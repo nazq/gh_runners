@@ -217,3 +217,62 @@ class TestHelp:
         """A tool that creates users must never do anything by default."""
         result = runner.invoke(cli.app, [])
         assert "Usage" in result.stdout
+
+
+class TestRemoveWithoutToken:
+    """Teardown must not require GitHub to be reachable.
+
+    `remove --purge` deletes accounts, homes, subuid ranges and the bind
+    mount — all local. Requiring a registration token first made teardown
+    impossible exactly when it is most needed: GitHub unreachable, or
+    running under sudo, whose `gh` is not authenticated.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _installed(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Report runners as present without touching the real filesystem:
+        removal deletes homes, so a stray real path would be destructive."""
+        monkeypatch.setattr(Path, "exists", lambda self: True)
+        monkeypatch.setattr(cli, "_rmtree", lambda path: None)
+        monkeypatch.setattr(cli, "uninstall_systemd_service", lambda *a, **k: None)
+
+    def test_proceeds_locally_when_no_token_can_be_had(
+        self, fake_run: FakeRun, fake_uid: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(cli, "_fetch_token_via_gh", lambda url: None)
+        result = runner.invoke(cli.app, ["remove"])
+        assert result.exit_code == 0
+        assert "removing locally" in result.stdout.lower()
+
+    def test_warns_about_registrations_it_could_not_remove(
+        self, fake_run: FakeRun, fake_uid: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Silently orphaning them would leave `setup` registering alongside
+        stale entries rather than replacing them."""
+        monkeypatch.setattr(cli, "_fetch_token_via_gh", lambda url: None)
+        result = runner.invoke(cli.app, ["remove"])
+        assert "WARNING" in result.stdout
+        assert "not deregistered" in result.stdout
+
+    def test_still_deregisters_when_a_token_is_available(
+        self, fake_run: FakeRun, fake_uid: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(cli, "_fetch_token_via_gh", lambda url: "tok123")
+        result = runner.invoke(cli.app, ["remove"])
+        assert result.exit_code == 0
+        assert "WARNING" not in result.stdout
+
+
+class TestSetupTokenError:
+    def test_root_is_told_to_mint_as_itself(
+        self, fake_run: FakeRun, as_root: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`gh auth login` is the wrong advice under sudo: root's gh is
+        unauthenticated while the operator's is fine."""
+        monkeypatch.setattr(cli, "_fetch_token_via_gh", lambda url: None)
+        org = cli.load_config().orgs[0]
+        with pytest.raises((SystemExit, Exception)):
+            cli._resolve_token(None, org)
+
+    def test_optional_resolver_prefers_an_explicit_token(self, org: Any) -> None:
+        assert cli._resolve_token_optional("explicit", org) == "explicit"
