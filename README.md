@@ -33,15 +33,39 @@ Built primarily for Rust/Tauri/Node CI but works for any workload. Linux and Win
 ## Install
 
 ```bash
-# From PyPI
+# Run without installing
+uvx gh-runners --help
+
+# Or install as a tool
 uv tool install gh-runners
 
 # Or pip
 pip install gh-runners
-
-# Verify
-gh-runners --help
 ```
+
+## Privileges
+
+**Run as yourself. Never prefix with `sudo`.**
+
+Three identities do the work, and the tool moves between them itself:
+
+| Identity | Does | Examples |
+|---|---|---|
+| **you** | reads config, mints tokens with *your* `gh` auth, calls the GitHub API | `status`, `logs`, `check-host` |
+| **root** | mutates host state, held briefly | `useradd`, `/etc/fstab`, `/etc/subuid`, mounts |
+| **runner** | everything inside a runner's home, as its owner | `config.sh`, caches, `systemctl --user` |
+
+When an operation needs root, you are asked for a password once, with the
+reason stated, and the grant covers the rest of the run.
+
+Running the whole tool under `sudo` breaks it in ways that look like
+unrelated bugs: `gh` reads root's config and reports "not logged in" while
+your own auth is fine, `uv` vanishes from `PATH`, and diagnostics that
+should consult GitHub silently answer from local state instead.
+
+In CI or cron, where there is no terminal to prompt on, privileged
+operations fail immediately with an explanation rather than hanging. Grant
+a passwordless sudo rule for the host if they need to run unattended.
 
 ## Quick Start
 

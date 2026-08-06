@@ -15,6 +15,7 @@ from typing import Annotated, Optional
 
 import typer
 
+from gh_runners import escalation as esc
 from gh_runners.check_host import cmd_check_host
 from gh_runners.config import Config, OrgConfig, load_config
 from gh_runners.reconcile import gh_org_from_url, github_runner_state
@@ -408,6 +409,12 @@ def doctor(
     from gh_runners.toolchain import toolchain_dir
 
     cfg = load_config()
+    # Observing needs to read inside runner homes, which means impersonating
+    # their owners. The wrapper used to force the whole command to root, and
+    # as root the local checks all succeeded — so `doctor` never asked GitHub
+    # and called a fleet healthy while six of ten runners were unreachable.
+    if is_linux() and any(o.isolated for o in _select_orgs(cfg, org)):
+        esc.ensure_root("inspecting runner homes")
     report = observe(cfg, toolchain_dir(), org)
     ok = _print_report(report, title="Diagnosis:")
 
@@ -440,6 +447,9 @@ def setup(
     """
     if is_windows():
         require_admin()
+    else:
+        # Creating accounts, the bind mount and subuid ranges needs root.
+        esc.ensure_root("setting up runners")
 
     cfg = load_config()
 
@@ -604,6 +614,10 @@ def start(org: Org = None) -> None:
     """Start all runner services."""
     if is_windows():
         require_admin()
+    else:
+        # Reaching the runners' own systemd manager means impersonating
+        # them, which needs root — as a means, not as the actor.
+        esc.ensure_root("starting runners")
 
     cfg = load_config()
     for o in _select_orgs(cfg, org):
@@ -627,6 +641,8 @@ def stop(org: Org = None) -> None:
     """Stop all runner services."""
     if is_windows():
         require_admin()
+    else:
+        esc.ensure_root("stopping runners")
 
     cfg = load_config()
     for o in _select_orgs(cfg, org):
@@ -655,6 +671,8 @@ def restart(
     """Restart runners, waiting for active jobs first."""
     if is_windows():
         require_admin()
+    else:
+        esc.ensure_root("restarting runners")
 
     cfg = load_config()
     print("Restarting runners...")
@@ -794,6 +812,9 @@ def status(org: Org = None) -> None:
 def clean(org: Org = None) -> None:
     """Clean work directories (runners must be stopped)."""
     cfg = load_config()
+    # _work belongs to the runner; deleting it means becoming them.
+    if is_linux() and any(o.isolated for o in _select_orgs(cfg, org)):
+        esc.ensure_root("cleaning work directories")
     active = _get_active_runners(cfg, org)
     if active:
         print(f"WARNING: Active jobs on: {', '.join(active)}")
@@ -827,6 +848,10 @@ def remove(
     """
     if is_windows():
         require_admin()
+    else:
+        # Deleting accounts, unmounting and editing /etc/subuid need root.
+        # Everything before this point — config, token — is the operator's.
+        esc.ensure_root("removing runners")
 
     cfg = load_config()
     orphaned: list[str] = []
@@ -963,7 +988,18 @@ def logs(
 
 
 def main() -> None:
-    app()
+    """Entry point.
+
+    Escalation failures are an expected outcome — no terminal to prompt on,
+    or a declined password — not a bug. Print them as a plain message; a
+    traceback here says "this tool crashed" when the truth is "this needs a
+    password and there is nobody to ask".
+    """
+    try:
+        app()
+    except esc.EscalationError as e:
+        print(f"\nERROR: {e}", file=sys.stderr)
+        raise SystemExit(1) from None
 
 
 if __name__ == "__main__":

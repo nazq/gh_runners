@@ -111,6 +111,7 @@ def fake_run(monkeypatch: pytest.MonkeyPatch) -> FakeRun:
         "gh_runners.cli",
         "gh_runners.provision",
         "gh_runners.reconcile",
+        "gh_runners.escalation",
     ):
         monkeypatch.setattr(f"{mod}.run_cmd", fake, raising=False)
     return fake
@@ -169,6 +170,28 @@ def _no_real_subprocess(monkeypatch: pytest.MonkeyPatch) -> None:
 
     for mod in ("gh_runners.platform", "gh_runners.privilege"):
         monkeypatch.setattr(f"{mod}.subprocess", _Guard, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _no_escalation_prompt(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Grant root without prompting, and reset the per-process cache.
+
+    Tests must never reach a real password prompt: with no tty pytest would
+    fail, and with one it would block the suite waiting for input.
+    """
+    from gh_runners import escalation
+
+    escalation.reset_cache()
+    monkeypatch.setattr(escalation, "have_root_now", lambda: True)
+
+
+@pytest.fixture
+def needs_escalation(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The opposite: no cached root, for testing the gate itself."""
+    from gh_runners import escalation
+
+    escalation.reset_cache()
+    monkeypatch.setattr(escalation, "have_root_now", lambda: False)
 
 
 @pytest.fixture
