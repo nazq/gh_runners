@@ -11,7 +11,9 @@ so each package can define whatever keys it needs (version, crates, flags, etc.)
 from __future__ import annotations
 
 import os
+import shutil
 import tarfile
+import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from collections.abc import Callable
@@ -75,7 +77,32 @@ def cargo_home(tc_dir: Path) -> Path:
 
 
 def node_home(tc_dir: Path) -> Path:
+    """Stable path to the primary version — a symlink into fnm's tree.
+
+    pnpm and the runners' PATH both need one directory that does not move
+    when another version is installed; fnm's own layout is versioned all
+    the way down.
+    """
     return tc_dir / "node"
+
+
+def fnm_dir(tc_dir: Path) -> Path:
+    """FNM_DIR: where fnm keeps its versions."""
+    return tc_dir / "fnm"
+
+
+def fnm_bin(tc_dir: Path) -> Path:
+    return fnm_dir(tc_dir) / "bin" / "fnm"
+
+
+def node_version_dir(tc_dir: Path, version: str) -> Path:
+    """fnm lays versions down as node-versions/vX.Y.Z/installation."""
+    v = version if version.startswith("v") else f"v{version}"
+    return fnm_dir(tc_dir) / "node-versions" / v
+
+
+def node_version_bin(tc_dir: Path, version: str) -> Path:
+    return node_version_dir(tc_dir, version) / "installation" / "bin" / "node"
 
 
 def go_home(tc_dir: Path) -> Path:
@@ -203,41 +230,96 @@ def _install_rust(tc_dir: Path, arch: str, cfg: dict[str, Any]) -> None:
 
 
 def _install_node(tc_dir: Path, arch: str, cfg: dict[str, Any]) -> None:
-    version: str = cfg.get("version", "22.14.0")
-    nh = node_home(tc_dir)
-    node_bin = nh / "bin" / "node"
+    """Install Node versions with fnm, side by side.
 
-    if node_bin.exists():
-        result = run_cmd([str(node_bin), "--version"], capture=True, check=False)
-        current = result.stdout.strip().lstrip("v")
-        if current == version:
-            print(f"  node: {version} already installed")
-            return
-        print(f"  node: upgrading {current} -> {version}...")
+    The previous installer kept exactly one version and ``rmtree``d the
+    whole node home to change it, so a repo pinning Node 20 could not
+    coexist with one pinning 22 — the second install destroyed the first.
 
-    node_arch = {"x64": "x64", "arm64": "arm64", "arm": "armv7l"}.get(arch, "x64")
-    tarball = f"node-v{version}-linux-{node_arch}.tar.xz"
-    url = f"https://nodejs.org/dist/v{version}/{tarball}"
+    fnm keeps each version in its own immutable directory and needs no
+    shell hook to use one: the interpreter is reachable by absolute path,
+    which is what makes this safe for a shared tree that twenty runners
+    read concurrently and none may write. Verified against fnm 1.39.0 with
+    the tree chmod'ed read-only.
+    """
+    version: str = str(cfg.get("version", "22.14.0"))
+    # Versions repos pin via .nvmrc or package.json engines. Pre-installed
+    # so a job starts warm rather than downloading mid-run, concurrently,
+    # into shared state.
+    extra: list[str] = [str(v) for v in cfg.get("extra_versions", [])]
 
-    print(f"  node: downloading {version} ({node_arch})...")
-    tarball_path = tc_dir / tarball
-    run_cmd(["curl", "-sSL", "-o", str(tarball_path), url])
+    fd = fnm_dir(tc_dir)
+    fd.mkdir(parents=True, exist_ok=True)
+    env = {**os.environ, "FNM_DIR": str(fd)}
 
-    if nh.exists():
-        import shutil
+    fnm = _ensure_fnm(tc_dir, arch, env)
+    if fnm is None:
+        return
 
-        shutil.rmtree(nh)
-    nh.mkdir(parents=True)
+    for v in [version, *extra]:
+        primary = v == version
+        label = "node" if primary else f"node {v}"
+        if node_version_bin(tc_dir, v).exists():
+            print(f"  {label}: {v} already installed")
+        else:
+            print(f"  {label}: installing {v}...")
+            result = run_cmd(
+                [str(fnm), "install", v], env=env, capture=True, check=False
+            )
+            if result.returncode != 0:
+                # One unavailable version must not cost the rest of the
+                # toolchain, but silence here fails later, inside a job.
+                print(f"  {label}: FAILED to install {v}")
+                continue
 
-    with tarfile.open(tarball_path, "r:xz") as tf:
-        for member in tf.getmembers():
-            parts = member.name.split("/", 1)
-            if len(parts) > 1:
-                member.name = parts[1]
-                tf.extract(member, nh)
-
-    tarball_path.unlink(missing_ok=True)
+    # A stable path for the primary version. pnpm and the runners' PATH both
+    # need one directory that does not move when a version is added, and
+    # fnm's own layout is versioned all the way down.
+    _link_primary_node(tc_dir, version)
     print(f"  node: {version} ready")
+
+
+def _ensure_fnm(tc_dir: Path, arch: str, env: dict[str, str]) -> Path | None:
+    """The fnm binary inside the toolchain, downloading it if absent."""
+    fnm = fnm_bin(tc_dir)
+    if fnm.exists():
+        return fnm
+
+    fnm_arch = {"x64": "x64", "arm64": "arm64", "arm": "arm32"}.get(arch, "x64")
+    url = (
+        "https://github.com/Schniz/fnm/releases/latest/download/"
+        f"fnm-linux-{fnm_arch}.zip"
+    )
+    print(f"  node: fetching fnm ({fnm_arch})...")
+    fnm.parent.mkdir(parents=True, exist_ok=True)
+    archive = tc_dir / "fnm.zip"
+    if run_cmd(["curl", "-sSL", "-o", str(archive), url], check=False).returncode != 0:
+        print("  node: FAILED to download fnm")
+        return None
+
+    with zipfile.ZipFile(archive) as zf:
+        zf.extractall(fnm.parent)
+    archive.unlink(missing_ok=True)
+    if not fnm.exists():
+        print("  node: fnm archive did not contain the expected binary")
+        return None
+    fnm.chmod(0o755)
+    return fnm
+
+
+def _link_primary_node(tc_dir: Path, version: str) -> None:
+    """Point ``node/bin`` at the primary version's bin directory."""
+    target = node_version_dir(tc_dir, version) / "installation"
+    link = node_home(tc_dir)
+    if not target.exists():
+        return
+    if link.is_symlink() or link.exists():
+        if link.is_symlink():
+            link.unlink()
+        elif link.is_dir():
+            shutil.rmtree(link)
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link.symlink_to(target, target_is_directory=True)
 
 
 def _install_cargo_tools(tc_dir: Path, arch: str, cfg: dict[str, Any]) -> None:
@@ -572,7 +654,7 @@ PACKAGES: dict[str, Package] = {
     ),
     "node": Package(
         name="node",
-        description="Node.js standalone runtime + npm",
+        description="Node.js via fnm (side-by-side versions)",
         install_fn=_install_node,
         supported_archs={"x64", "arm64", "arm"},
         default_version="22.14.0",

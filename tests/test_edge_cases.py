@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import tarfile
 from pathlib import Path
 
 import pytest
@@ -28,30 +27,30 @@ class TestConfigFallback:
 
 
 class TestNodeReplacement:
-    def test_replaces_an_existing_installation(
-        self, fake_run: FakeRun, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    def test_a_second_version_does_not_replace_the_first(
+        self, fake_run: FakeRun, tmp_path: Path
     ) -> None:
-        """Extracting over a different version leaves both sets of files
-        interleaved, so the old tree is removed first."""
-        nh = pkgs.node_home(tmp_path)
-        (nh / "bin").mkdir(parents=True)
-        (nh / "bin" / "node").write_text("#!/bin/sh\n")
-        (nh / "stale-file").write_text("from the old version")
-        fake_run.when("node --version", stdout="v20.0.0\n")
+        """The inverse of the old behaviour, and the reason for the change.
 
-        class _Tar:
-            def __enter__(self) -> _Tar:
-                return self
+        The tarball installer kept one version and `rmtree`d the node home
+        to change it, so installing 22 destroyed 20. fnm gives each version
+        its own immutable directory, which is what lets a repo pinning 20
+        and one pinning 22 run concurrently on the same host.
+        """
+        fnm = pkgs.fnm_bin(tmp_path)
+        fnm.parent.mkdir(parents=True, exist_ok=True)
+        fnm.write_text("#!/bin/sh\n")
+        for v in ("20.19.0", "22.14.0"):
+            b = pkgs.node_version_bin(tmp_path, v)
+            b.parent.mkdir(parents=True, exist_ok=True)
+            b.write_text("#!/bin/sh\n")
 
-            def __exit__(self, *exc: object) -> None:
-                return None
+        pkgs._install_node(
+            tmp_path, "x64", {"version": "22.14.0", "extra_versions": ["20.19.0"]}
+        )
 
-            def getmembers(self) -> list[object]:
-                return []
-
-        monkeypatch.setattr(tarfile, "open", lambda *a, **k: _Tar())
-        pkgs._install_node(tmp_path, "x64", {"version": "22.14.0"})
-        assert not (nh / "stale-file").exists()
+        assert pkgs.node_version_bin(tmp_path, "20.19.0").exists()
+        assert pkgs.node_version_bin(tmp_path, "22.14.0").exists()
 
 
 class TestRustComponentsOnFreshInstall:
