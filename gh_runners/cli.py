@@ -364,12 +364,20 @@ def list_packages() -> None:
         archs = ", ".join(sorted(pkg.supported_archs))
         ok = "yes" if arch in pkg.supported_archs else "MANUAL"
 
-        configured = toolchain.pkg_cfg(pkg.name).get("version") if toolchain else None
+        pkg_cfg = toolchain.pkg_cfg(pkg.name) if toolchain else {}
+        configured = pkg_cfg.get("version")
         ver = str(configured or pkg.default_version or "-")
         # A configured package is what this host installs; an unconfigured
         # one is only a suggestion, and conflating them is the whole bug.
         if configured is None and pkg.default_version:
             ver += " (default)"
+
+        # Extra versions are installed alongside the primary one, so a table
+        # showing only the primary understates what is on the host: `rust`
+        # read "1.97" while 1.92.0 was equally present and equally usable.
+        extra = [str(v) for v in pkg_cfg.get("extra_versions", [])]
+        if extra:
+            ver += f" +{','.join(extra)}"
 
         print(f"  {pkg.name:<16} {archs:<20} {ver:<18} {pkg.description}")
         if arch not in pkg.supported_archs and pkg.manual_msg:

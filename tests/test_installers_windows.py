@@ -114,34 +114,27 @@ class TestInstallPwshLinux:
 
 
 class TestInstallPythonWindows:
-    def test_installs_via_winget(
-        self, fake_run: FakeRun, tmp_path: Path, on_windows: None
-    ) -> None:
-        fake_run.when("python --version", returncode=127)
-        pkgs._install_python(tmp_path, "x64", {"version": "3.12"})
-        assert any("winget" in ln for ln in fake_run.command_lines)
+    """Windows uses uv too — the same path as Linux.
 
-    def test_derives_the_winget_package_id(
-        self, fake_run: FakeRun, tmp_path: Path, on_windows: None
-    ) -> None:
-        """winget IDs are Python.Python.3.12, not the bare version."""
-        fake_run.when("python --version", returncode=127)
-        pkgs._install_python(tmp_path, "x64", {"version": "3.12"})
-        assert any("Python.Python.3.12" in ln for ln in fake_run.command_lines)
+    winget installed only whatever the ID resolved to, could not place
+    versions side by side under our control, and gave Windows a different
+    Python story from Linux for no benefit.
+    """
 
-    def test_skips_when_already_at_that_version(
+    def test_installs_via_uv(
         self, fake_run: FakeRun, tmp_path: Path, on_windows: None
     ) -> None:
-        fake_run.when("python --version", stdout="Python 3.12.4")
         pkgs._install_python(tmp_path, "x64", {"version": "3.12"})
+        assert fake_run.ran("uv python install 3.12")
         assert not any("winget" in ln for ln in fake_run.command_lines)
 
-    def test_replaces_a_different_version(
+    def test_installs_extra_versions(
         self, fake_run: FakeRun, tmp_path: Path, on_windows: None
     ) -> None:
-        fake_run.when("python --version", stdout="Python 3.10.0")
-        pkgs._install_python(tmp_path, "x64", {"version": "3.12"})
-        assert any("winget" in ln for ln in fake_run.command_lines)
+        pkgs._install_python(
+            tmp_path, "x64", {"version": "3.12", "extra_versions": ["3.11"]}
+        )
+        assert fake_run.ran("uv python install 3.11")
 
 
 class TestVerifyWindowsToolchain:

@@ -19,6 +19,7 @@ from gh_runners.packages import (
     go_home,
     install_package,
     node_home,
+    python_bin,
     pwsh_home,
     rustup_home,
 )
@@ -77,6 +78,7 @@ def toolchain_env(tc_dir: Path) -> dict[str, str]:
         go_home(tc_dir) / "bin",
         pwsh_home(tc_dir),
         bun_home(tc_dir),
+        python_bin(tc_dir),
     ]:
         if bindir.exists():
             path_parts.append(str(bindir))

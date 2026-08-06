@@ -152,18 +152,62 @@ class TestInstallBun:
 
 
 class TestInstallPython:
-    def test_skipped_on_linux(
+    """uv is the only supported source, on every platform.
+
+    The previous split — winget on Windows, nothing at all on Linux — meant
+    Linux runners silently used whatever interpreter the host happened to
+    have. A repo pinning 3.11 got the host's 3.13 and failed at import,
+    inside a job, rather than at setup.
+    """
+
+    def test_installs_via_uv_on_linux(
         self,
         fake_run: FakeRun,
         tmp_path: Path,
         capsys: pytest.CaptureFixture[str],
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Linux runners use the host interpreter; installing another would
-        just add a second Python to keep in sync."""
         monkeypatch.setattr("sys.platform", "linux")
         pkgs._install_python(tmp_path, "x64", {"version": "3.12"})
-        assert "skipping" in capsys.readouterr().out
+        assert fake_run.ran("uv python install 3.12")
+        assert "3.12 ready" in capsys.readouterr().out
+
+    def test_installs_extra_versions_alongside(
+        self, fake_run: FakeRun, tmp_path: Path
+    ) -> None:
+        """A pinned version must be warm before the job, not downloaded
+        during it, concurrently, into shared state."""
+        pkgs._install_python(
+            tmp_path, "x64", {"version": "3.12", "extra_versions": ["3.11", "3.13"]}
+        )
+        assert fake_run.ran("uv python install 3.12")
+        assert fake_run.ran("uv python install 3.11")
+        assert fake_run.ran("uv python install 3.13")
+
+    def test_isolates_the_install_into_the_toolchain(
+        self, fake_run: FakeRun, tmp_path: Path
+    ) -> None:
+        """Interpreters belong beside RUSTUP_HOME, not in the invoking
+        user's home: every runner reads the same tree."""
+        pkgs._install_python(tmp_path, "x64", {"version": "3.12"})
+        assert pkgs.python_home(tmp_path).exists()
+        assert pkgs.python_bin(tmp_path).exists()
+
+    def test_a_failed_version_does_not_abort_the_rest(
+        self,
+        fake_run: FakeRun,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """One unavailable version must not take the toolchain with it — but
+        it must be visible, or it fails later and far from the cause."""
+        fake_run.when("uv python install 3.99", returncode=1, stderr="no such version")
+        pkgs._install_python(
+            tmp_path, "x64", {"version": "3.12", "extra_versions": ["3.99"]}
+        )
+        out = capsys.readouterr().out
+        assert "FAILED" in out
+        assert "3.12 ready" in out
 
 
 class TestInstallPackage:

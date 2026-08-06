@@ -86,6 +86,20 @@ def bun_home(tc_dir: Path) -> Path:
     return tc_dir / "bun"
 
 
+def python_home(tc_dir: Path) -> Path:
+    """Where uv installs interpreters — shared, like RUSTUP_HOME."""
+    return tc_dir / "python"
+
+
+def python_bin(tc_dir: Path) -> Path:
+    """Where uv links the `python3.X` executables.
+
+    Interpreters themselves live in versioned directories, so this is the
+    one stable path a runner's PATH can point at.
+    """
+    return tc_dir / "python" / "bin"
+
+
 def _rust_env(tc_dir: Path) -> dict[str, str]:
     """Environment for isolated Rust operations."""
     return {
@@ -434,45 +448,53 @@ def pwsh_home(tc_dir: Path) -> Path:
 
 
 def _install_python(tc_dir: Path, arch: str, cfg: dict[str, Any]) -> None:
-    """Install Python via winget on Windows. On Linux, skips (host Python used)."""
-    import sys
+    """Install Python interpreters with uv, into the shared toolchain.
 
-    version: str = cfg.get("version", "3.12")
+    uv is the only supported source. It installs each version side by side
+    and works identically on Linux and Windows, which the previous split did
+    not: winget on Windows, and on Linux nothing at all — runners silently
+    used whatever interpreter the host happened to have, so a repo needing
+    3.11 got the host's 3.13 and failed at import rather than at setup.
 
-    if sys.platform != "win32":
-        print(
-            f"  python: skipping (Linux runners use host Python {sys.version.split()[0]})"
+    Versions land under the toolchain directory rather than the invoking
+    user's home, for the same reason RUSTUP_HOME does: every runner reads
+    the same tree, and nothing is written into it during a job.
+    """
+    version: str = str(cfg.get("version", "3.12"))
+    # Versions a repo may pin alongside the default. Same rationale as rust:
+    # a job that needs 3.11 should start warm rather than downloading it
+    # mid-run, concurrently, into shared state.
+    extra: list[str] = [str(v) for v in cfg.get("extra_versions", [])]
+
+    install_dir = python_home(tc_dir)
+    bin_dir = python_bin(tc_dir)
+    install_dir.mkdir(parents=True, exist_ok=True)
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    env = {
+        **os.environ,
+        "UV_PYTHON_INSTALL_DIR": str(install_dir),
+        # Interpreters live in versioned directories; this is the single
+        # stable path a runner's PATH can carry.
+        "UV_PYTHON_BIN_DIR": str(bin_dir),
+    }
+
+    for v in [version, *extra]:
+        primary = v == version
+        label = "python" if primary else f"python {v}"
+        result = run_cmd(
+            ["uv", "python", "install", v],
+            env=env,
+            capture=True,
+            check=False,
         )
-        return
-
-    # Check if already installed
-    result = run_cmd(["python", "--version"], capture=True, check=False)
-    if result.returncode == 0:
-        current = result.stdout.strip().replace("Python ", "")
-        if current.startswith(version):
-            print(f"  python: {current} already installed")
-            return
-        print(f"  python: {current} found, installing {version}...")
-    else:
-        print(f"  python: installing {version} via winget...")
-
-    # Derive the winget ID — Python.Python.3.XX
-    major_minor = version if "." in version else f"{version}.0"
-    winget_id = f"Python.Python.{major_minor}"
-
-    run_cmd(
-        [
-            "winget",
-            "install",
-            "--id",
-            winget_id,
-            "--accept-source-agreements",
-            "--accept-package-agreements",
-            "--silent",
-        ],
-        check=False,
-    )
-    print(f"  python: {version} ready")
+        if result.returncode != 0:
+            # Not fatal: one unavailable version must not abort the rest of
+            # the toolchain, but it must be visible — a silently missing
+            # interpreter fails later, inside a job, far from the cause.
+            print(f"  {label}: FAILED to install {v}")
+            print(f"    {result.stderr.strip().splitlines()[-1:] or ['(no output)']}")
+            continue
+        print(f"  {label}: {v} ready")
 
 
 # ---------------------------------------------------------------------------
@@ -642,7 +664,7 @@ PACKAGES: dict[str, Package] = {
     ),
     "python": Package(
         name="python",
-        description="Python runtime (Windows: winget, Linux: uses host Python)",
+        description="Python interpreters via uv (side-by-side versions)",
         install_fn=_install_python,
         supported_archs={"x64", "arm64", "arm"},
         default_version="3.12",
