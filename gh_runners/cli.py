@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import tempfile
 import time
 import zipfile
 from pathlib import Path
@@ -143,12 +144,35 @@ def _resolve_token(token: str | None, org: OrgConfig) -> str:
 
 
 def _download_runner(cfg: Config) -> Path:
+    """Fetch the runner archive into shared, operator-writable storage.
+
+    Not under ``base_dir``: that resolves inside a runner's home, which is
+    ``drwx------`` and owned by the runner. Downloading there as the
+    operator fails with ``curl: (23) client returned ERROR on write``,
+    naming neither the directory nor the permission.
+
+    The archive is identical for every org, so the shared toolchain root is
+    where it belongs anyway — one download serves all of them.
+    """
+    from gh_runners.provision import TOOLCHAIN_ROOT
+
     version = cfg.runner_version
     archive = runner_archive_name(version)
-    cache_dir = Path(cfg.orgs[0].base_dir).parent if cfg.orgs else Path.cwd()
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    archive_path = cache_dir / archive
 
+    cache_dir = TOOLCHAIN_ROOT / "cache" if is_linux() else Path.cwd()
+    try:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        # mkdir succeeds on a directory we cannot write into, so prove it.
+        probe = cache_dir / ".write-probe"
+        probe.touch()
+        probe.unlink()
+    except OSError:
+        # A host whose toolchain root is root-owned and not yet writable:
+        # fall back rather than failing the whole setup over a cache path.
+        cache_dir = Path(tempfile.gettempdir())
+        cache_dir.mkdir(parents=True, exist_ok=True)
+
+    archive_path = cache_dir / archive
     if archive_path.exists():
         print(f"Runner archive cached: {archive_path}")
         return archive_path
@@ -160,7 +184,16 @@ def _download_runner(cfg: Config) -> Path:
     if is_windows():
         run_powershell(f'Invoke-WebRequest -Uri "{url}" -OutFile "{archive_path}"')
     else:
-        run_cmd(["curl", "-sSL", "-o", str(archive_path), url])
+        # --fail so an HTTP error is reported as one rather than writing the
+        # error page to disk and failing later on the contents.
+        result = run_cmd(
+            ["curl", "-sSL", "--fail", "-o", str(archive_path), url], check=False
+        )
+        if result.returncode != 0:
+            archive_path.unlink(missing_ok=True)
+            print(f"\n  ERROR: could not download the runner to {archive_path}")
+            print(f"  curl exited {result.returncode} fetching {url}")
+            raise typer.Exit(1)
 
     print(f"  Saved to {archive_path}")
     return archive_path

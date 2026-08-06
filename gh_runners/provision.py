@@ -36,6 +36,16 @@ def ensure_shared_roots() -> bool:
             changed = True
         priv.as_root(["chown", "root:root", str(d)], check=False)
         priv.as_root(["chmod", "755", str(d)], check=False)
+
+    # The runner archive is downloaded by the operator, not by root, and is
+    # identical for every org. It cannot live under a runner's home — those
+    # are drwx------ and owned by the runner, so the download fails with a
+    # bare `curl: (23)` naming neither the path nor the permission.
+    cache = TOOLCHAIN_ROOT / "cache"
+    if not cache.is_dir():
+        priv.as_root(["mkdir", "-p", str(cache)], check=False)
+        changed = True
+    priv.as_root(["chmod", "1777", str(cache)], check=False)
     return changed
 
 

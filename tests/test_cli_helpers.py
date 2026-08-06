@@ -63,35 +63,69 @@ class TestResolveToken:
 
 
 class TestDownloadRunner:
+    """The archive must land somewhere the *operator* can write.
+
+    It used to be cached under base_dir's parent, which resolves inside a
+    runner's home — drwx------ and owned by the runner. Downloading there
+    as the operator fails with `curl: (23) client returned ERROR on write`,
+    which names neither the directory nor the permission.
+    """
+
+    @pytest.fixture
+    def cache(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        c = tmp_path / "toolchain"
+        monkeypatch.setattr("gh_runners.provision.TOOLCHAIN_ROOT", c)
+        return c / "cache"
+
     def test_reuses_a_cached_archive(
-        self,
-        fake_run: FakeRun,
-        cfg: Any,
-        tmp_path: Path,
-        capsys: pytest.CaptureFixture[str],
+        self, fake_run: FakeRun, cfg: Any, cache: Path
     ) -> None:
         """Re-downloading ~200MB on every setup run is pure waste."""
-        cfg.orgs[0].base_dir = str(tmp_path / "org")
         from gh_runners.platform import runner_archive_name
 
-        (tmp_path / runner_archive_name(cfg.runner_version)).write_bytes(b"cached")
+        cache.mkdir(parents=True)
+        (cache / runner_archive_name(cfg.runner_version)).write_bytes(b"cached")
         path = cli._download_runner(cfg)
         assert path.read_bytes() == b"cached"
         assert not fake_run.ran("curl")
 
     def test_downloads_when_absent(
-        self, fake_run: FakeRun, cfg: Any, tmp_path: Path
+        self, fake_run: FakeRun, cfg: Any, cache: Path
     ) -> None:
-        cfg.orgs[0].base_dir = str(tmp_path / "org")
         cli._download_runner(cfg)
         assert fake_run.ran("curl")
 
-    def test_url_matches_the_configured_version(
-        self, fake_run: FakeRun, cfg: Any, tmp_path: Path
+    def test_never_downloads_into_a_runner_home(
+        self, fake_run: FakeRun, cfg: Any, cache: Path
     ) -> None:
-        cfg.orgs[0].base_dir = str(tmp_path / "org")
-        cli._download_runner(cfg)
-        assert any(cfg.runner_version in ln for ln in fake_run.command_lines)
+        """The regression: base_dir is inside a home the operator cannot
+        write to, so the download failed on a bare curl exit code."""
+        path = cli._download_runner(cfg)
+        assert str(cfg.orgs[0].base_dir) not in str(path)
+
+    def test_reports_a_failed_download(
+        self, fake_run: FakeRun, cfg: Any, cache: Path, capsys: Any
+    ) -> None:
+        """curl's exit code alone said nothing about which path or URL."""
+        import typer
+
+        fake_run.when("curl", returncode=23)
+        with pytest.raises(typer.Exit):
+            cli._download_runner(cfg)
+        out = capsys.readouterr().out
+        assert "could not download" in out
+        assert "23" in out
+
+    def test_falls_back_when_the_cache_is_not_writable(
+        self, fake_run: FakeRun, cfg: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A root-owned toolchain root on a host that has not run setup yet
+        must not fail the whole command over a cache path."""
+        monkeypatch.setattr(
+            "gh_runners.provision.TOOLCHAIN_ROOT", Path("/proc/nonexistent")
+        )
+        path = cli._download_runner(cfg)
+        assert path.parent.exists()
 
 
 class TestExtractRunner:
