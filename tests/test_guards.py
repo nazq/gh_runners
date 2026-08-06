@@ -154,6 +154,7 @@ class TestRootOwnedRepair:
         assert any("chown -R ghr-test:ghr-test" in ln for ln in fake_run.command_lines)
 
 
+@pytest.mark.posix_only
 class TestBunExtraction:
     def test_strips_the_archive_prefix_and_marks_bun_executable(
         self, fake_run: FakeRun, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

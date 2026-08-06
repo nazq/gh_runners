@@ -56,6 +56,7 @@ class TestRunnerUserEnv:
         assert plat.runner_user() == "ghr-test"
 
 
+@pytest.mark.posix_only
 class TestSystemctlUserDispatch:
     def test_uses_the_callers_manager_when_no_user_is_set(
         self, fake_run: FakeRun, monkeypatch: pytest.MonkeyPatch
@@ -76,6 +77,7 @@ class TestSystemctlUserDispatch:
         assert "ghr-test" in " ".join(fake_run.calls[0])
 
 
+@pytest.mark.posix_only
 class TestSystemdUserDir:
     def test_defaults_to_the_callers_home(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path

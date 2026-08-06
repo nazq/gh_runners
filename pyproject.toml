@@ -46,6 +46,7 @@ testpaths = ["tests"]
 addopts = "--strict-markers --strict-config"
 markers = [
     "no_platform_stub: do not force is_linux/is_windows (for platform-detection tests)",
+    "posix_only: exercises functionality that exists only on Linux/macOS",
 ]
 
 [tool.coverage.run]

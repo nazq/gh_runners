@@ -16,6 +16,9 @@ import pytest
 from gh_runners import provision
 from tests.conftest import FakeRun
 
+# Subordinate uid ranges, bind mounts and /etc/fstab — none of it exists on Windows.
+pytestmark = pytest.mark.posix_only
+
 
 @pytest.fixture
 def existing_user(monkeypatch: pytest.MonkeyPatch) -> None:

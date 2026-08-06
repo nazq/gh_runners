@@ -14,7 +14,7 @@ import pytest
 from gh_runners import privilege as priv
 from tests.conftest import FakeRun
 
-pytestmark = pytest.mark.usefixtures("fake_uid")
+pytestmark = [pytest.mark.usefixtures("fake_uid"), pytest.mark.posix_only]
 
 
 class TestAsUser:

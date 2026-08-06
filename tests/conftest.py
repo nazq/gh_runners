@@ -13,6 +13,7 @@ path, so `tmp_path` handles the rest.
 from __future__ import annotations
 
 import subprocess
+import sys
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
@@ -265,3 +266,21 @@ def _linux(
         monkeypatch.setattr(f"{mod}.is_windows", lambda: False, raising=False)
         monkeypatch.setattr(f"{mod}.is_linux", lambda: True, raising=False)
     yield
+
+
+def pytest_collection_modifyitems(
+    config: pytest.Config, items: list[pytest.Item]
+) -> None:
+    """Skip posix_only tests on Windows.
+
+    A good deal of this tool is Linux-only by nature: subordinate uid ranges,
+    bind mounts, sudo impersonation, the `pwd` module. The Windows half of
+    the matrix exists to verify the code that *does* run there, and forcing
+    these to pass on it would mean asserting behaviour that cannot exist.
+    """
+    if not sys.platform.startswith("win"):
+        return
+    skip = pytest.mark.skip(reason="POSIX-only functionality")
+    for item in items:
+        if "posix_only" in item.keywords:
+            item.add_marker(skip)
