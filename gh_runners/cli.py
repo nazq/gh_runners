@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import json
+import os
 import shutil
+import subprocess
 import tarfile
 import time
 import zipfile
@@ -153,7 +156,48 @@ def _extract_runner(archive_path: Path, dest: Path) -> None:
             zf.extractall(dest)
     else:
         with tarfile.open(archive_path, "r:gz") as tf:
-            tf.extractall(dest)
+            # filter="data" is the default from Python 3.14 and a
+            # DeprecationWarning before it. Passing it explicitly keeps the
+            # behaviour identical across every supported version, and rejects
+            # absolute paths and traversal in the archive — worth having for
+            # something downloaded over the network.
+            tf.extractall(dest, filter="data")
+
+
+def priv_systemctl_user(user: str, *args: str) -> subprocess.CompletedProcess[str]:
+    from gh_runners.privilege import systemctl_user
+
+    return systemctl_user(user, *args)
+
+
+def _github_runner_state(org: OrgConfig) -> dict[str, str]:
+    """Map runner name -> "online"/"offline"/"busy", per GitHub.
+
+    Used when the operator cannot read the runners' own systemd manager.
+    This is the more truthful source anyway: it reports whether GitHub can
+    actually dispatch work, which is the question `status` is really asking.
+    Returns {} if the gh CLI is unavailable or the call fails.
+    """
+    gh_org = _gh_org_from_url(org.url)
+    if not gh_org:
+        return {}
+    result = run_cmd(
+        ["gh", "api", f"orgs/{gh_org}/actions/runners", "--paginate"],
+        capture=True,
+        check=False,
+    )
+    if result.returncode != 0 or not result.stdout.strip():
+        return {}
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return {}
+    runners = payload.get("runners", []) if isinstance(payload, dict) else []
+    return {
+        r["name"]: ("busy" if r.get("busy") else r.get("status", "?"))
+        for r in runners
+        if isinstance(r, dict) and "name" in r
+    }
 
 
 def _get_active_runners(cfg: Config, org_name: str | None) -> list[str]:
@@ -232,16 +276,43 @@ def _rmtree_readonly(func: Callable[..., object], path: str, exc: object) -> Non
 
 
 def _clean_work_dirs(cfg: Config, org_name: str | None) -> None:
+    """Wipe each runner's _work.
+
+    Must run AS the runner. Doing it as the operator (or as root via the
+    sudo wrapper) recreates _work owned by the wrong user, and the runner
+    then cannot write into its own workspace:
+
+      System.UnauthorizedAccessException: Access to the path
+      '.../runner-6/_work/_tool' is denied.
+
+    Which is the root-owned-files failure this isolation work exists to
+    prevent, reintroduced by the cleanup path.
+    """
+    from gh_runners import privilege as priv
+
     print("Cleaning work directories...")
     for org in _select_orgs(cfg, org_name):
+        user = org.runner_user or None
         for i in range(1, org.runner_count + 1):
             name = org.runner_name(i)
             work_dir = org.runner_dir(i) / "_work"
-            if work_dir.exists():
-                size = _dir_size_human(work_dir)
-                shutil.rmtree(work_dir, onexc=_rmtree_readonly)
-                work_dir.mkdir()
-                print(f"  {name}/_work cleaned (was {size})")
+
+            if user is None:
+                if work_dir.exists():
+                    size = _dir_size_human(work_dir)
+                    shutil.rmtree(work_dir, onexc=_rmtree_readonly)
+                    work_dir.mkdir()
+                    print(f"  {name}/_work cleaned (was {size})")
+                continue
+
+            if not priv.exists_as(user, work_dir):
+                continue
+            size = priv.as_user(
+                user, ["du", "-sh", str(work_dir)], check=False, capture=True
+            ).stdout.split("\t")[0]
+            priv.as_user(user, ["rm", "-rf", str(work_dir)], check=False)
+            priv.as_user(user, ["mkdir", "-p", str(work_dir)], check=False)
+            print(f"  {name}/_work cleaned (was {size or 'unknown'})")
 
 
 # ---------------------------------------------------------------------------
@@ -284,10 +355,71 @@ def setup_toolchain() -> None:
     _setup_toolchain(cfg)
 
 
+def _print_report(report: object, *, title: str) -> bool:
+    """Render a reconcile.Report. Returns True when nothing needs work."""
+    from gh_runners.reconcile import Report, State
+
+    assert isinstance(report, Report)
+    print(f"\n{title}")
+    for f in report.info:
+        print(f"  [INFO   ] {f.name}: {f.detail}")
+    if report.clean:
+        print("  everything matches the desired state")
+        return True
+    for f in report.findings:
+        if f.state is State.OK:
+            continue
+        mark = "DRIFT " if f.state is State.DRIFT else "BLOCKED"
+        print(f"  [{mark}] {f.name}: {f.detail}")
+    if report.blocked:
+        print(
+            f"\n  {len(report.blocked)} item(s) need a human — repairing them "
+            "automatically could destroy something."
+        )
+    return False
+
+
+@app.command()
+def doctor(
+    org: Org = None,
+    fix: Annotated[
+        bool, typer.Option("--fix", help="Repair what is safely repairable.")
+    ] = False,
+) -> None:
+    """Diagnose problems with the runner installation.
+
+    Distinct from `setup --check`, which asks whether actual state matches
+    config. `doctor` asks whether this host can run runners at all, and
+    whether anything about it is unsafe — questions with no config field to
+    compare against.
+    """
+    from gh_runners.reconcile import apply, observe
+    from gh_runners.toolchain import toolchain_dir
+
+    cfg = load_config()
+    report = observe(cfg, toolchain_dir(), org)
+    ok = _print_report(report, title="Diagnosis:")
+
+    if ok:
+        return
+    if not fix:
+        print("\n  re-run with --fix to repair the DRIFT items")
+        raise typer.Exit(1)
+
+    repaired, skipped = apply(report, cfg)
+    print(f"\n  repaired {repaired}, skipped {skipped}")
+    if report.blocked:
+        raise typer.Exit(1)
+
+
 @app.command()
 def setup(
     token: Token = None,
     org: Org = None,
+    check: Annotated[
+        bool,
+        typer.Option("--check", help="Report what would change; change nothing."),
+    ] = False,
 ) -> None:
     """Download, configure, and install runners.
 
@@ -299,7 +431,53 @@ def setup(
         require_admin()
 
     cfg = load_config()
+
+    # --check is observation only, so it must run before anything is
+    # downloaded or created.
+    if check:
+        from gh_runners.reconcile import observe
+        from gh_runners.toolchain import toolchain_dir
+
+        report = observe(cfg, toolchain_dir(), org)
+        if not _print_report(report, title="Drift:"):
+            raise typer.Exit(1)
+        return
+
     orgs = _select_orgs(cfg, org)
+
+    # Provision the host prerequisites before anything else: the accounts,
+    # their homes, the bind mount and podman. Without these, extraction and
+    # registration have nowhere to go. All idempotent.
+    if is_linux() and any(o.isolated for o in orgs):
+        from gh_runners.provision import (
+            RUNNER_HOME_ROOT,
+            ensure_bind_mount,
+            ensure_podman,
+            ensure_shared_roots,
+            ensure_user,
+        )
+
+        print("\nProvisioning host...")
+        if ensure_shared_roots():
+            print("  shared roots created")
+        # No runner_home_real configured means homes live directly under
+        # /srv/gh-runners, which ensure_shared_roots already created.
+        if cfg.runner_home_real:
+            real = Path(cfg.runner_home_real)
+            if not real.parent.is_dir():
+                print(
+                    f"  WARNING: runner_home_real {real} has no parent "
+                    f"directory; skipping bind mount. Homes will be created "
+                    f"on whatever volume backs {RUNNER_HOME_ROOT}."
+                )
+            elif ensure_bind_mount(real, RUNNER_HOME_ROOT):
+                print(f"  bind mount {real} -> {RUNNER_HOME_ROOT}")
+        for o in orgs:
+            if ensure_user(o):
+                print(f"  {o.runner_user}: account ready")
+            if ensure_podman(o):
+                print(f"  {o.runner_user}: podman ready")
+
     archive_path = _download_runner(cfg)
 
     # On Linux, prepare toolchain env for runner .env files
@@ -390,7 +568,19 @@ def setup(
             if tc_dir is not None and tc_dir.exists():
                 write_runner_env(o, tc_dir)
             for i in range(1, o.runner_count + 1):
-                start_service(o.service_prefix, i)
+                start_service(o.service_prefix, i, o.runner_user or None)
+
+    # Creating is not enough: an existing install can be present but wrong
+    # (stale .env, dangling bin symlink, podman state left over from a home
+    # move). Reconcile before declaring success.
+    from gh_runners.reconcile import apply, observe
+    from gh_runners.toolchain import toolchain_dir
+
+    report = observe(cfg, toolchain_dir(), org)
+    if not report.clean:
+        repaired, skipped = apply(report, cfg)
+        print(f"\nReconciled: repaired {repaired}, skipped {skipped}")
+        _print_report(observe(cfg, toolchain_dir(), org), title="Remaining:")
 
     total = sum(o.runner_count for o in orgs)
     print(f"\nSetup complete! {total} runners configured and running.")
@@ -416,7 +606,7 @@ def start(org: Org = None) -> None:
             if is_windows():
                 win_start_task(rdir)
             else:
-                start_service(o.service_prefix, i)
+                start_service(o.service_prefix, i, o.runner_user or None)
             print(f"  {name}: started")
     print("Done.")
 
@@ -439,7 +629,7 @@ def stop(org: Org = None) -> None:
             if is_windows():
                 win_stop_task(rdir)
             else:
-                stop_service(o.service_prefix, i)
+                stop_service(o.service_prefix, i, o.runner_user or None)
             print(f"  {name}: stopped")
     print("Done.")
 
@@ -473,7 +663,7 @@ def restart(
             if is_windows():
                 win_stop_task(rdir)
             else:
-                stop_service(o.service_prefix, i)
+                stop_service(o.service_prefix, i, o.runner_user or None)
 
     time.sleep(2)
     _clean_work_dirs(cfg, org)
@@ -487,7 +677,7 @@ def restart(
             if is_windows():
                 win_start_task(rdir)
             else:
-                start_service(o.service_prefix, i)
+                start_service(o.service_prefix, i, o.runner_user or None)
 
     print("Done.")
 
@@ -497,18 +687,53 @@ def status(org: Org = None) -> None:
     """Show status of all runner services."""
     cfg = load_config()
     for o in _select_orgs(cfg, org):
+        # Without root we cannot read the runners' systemd manager, so ask
+        # GitHub instead of reporting a state we cannot observe.
+        gh_state = (
+            _github_runner_state(o)
+            if o.runner_user and os.geteuid() != 0 and not is_windows()
+            else {}
+        )
+
         print(f"\n{o.name}")
-        print(f"{'Runner':<24} {'Status':<16} {'Active Job'}")
+        source = "GitHub" if gh_state else "systemd"
+        print(f"{'Runner':<24} {'Status (' + source + ')':<16} {'Active Job'}")
         print("-" * 55)
 
         for i in range(1, o.runner_count + 1):
             name = o.runner_name(i)
             rdir = o.runner_dir(i)
 
-            if not rdir.exists():
+            # Runner homes are drwx------, so from the operator a plain
+            # exists() raises PermissionError rather than answering. Asking
+            # as the owner needs root, and `status` is deliberately usable
+            # without it — so treat an unreadable directory as installed and
+            # let systemd, which needs no such access, report the real state.
+            try:
+                installed = rdir.exists()
+            except PermissionError:
+                installed = True
+
+            if not installed:
                 svc_status = "not set up"
             elif is_windows():
                 svc_status = service_status(o.service_prefix, i, runner_dir=rdir)
+            elif o.runner_user and os.geteuid() != 0:
+                # Isolated runners live in another user's systemd manager. A
+                # bare `systemctl --user` would query the operator's, find no
+                # such unit, and report every healthy runner as "inactive" —
+                # worse than admitting we cannot see. "?" only survives if
+                # the GitHub lookup also failed.
+                svc_status = gh_state.get(name, "?")
+            elif o.runner_user:
+                svc_status = (
+                    priv_systemctl_user(
+                        o.runner_user,
+                        "is-active",
+                        f"{o.service_prefix}@{i}.service",
+                    ).stdout.strip()
+                    or "inactive"
+                )
             else:
                 svc_status = service_status(o.service_prefix, i)
 
@@ -529,7 +754,10 @@ def status(org: Org = None) -> None:
                 )
                 has_job = result.returncode == 0 and bool(result.stdout.strip())
 
-            job_str = "RUNNING JOB" if has_job else "-"
+            # pgrep sees other users' processes (/proc is world-readable), so
+            # has_job is reliable even unprivileged; GitHub's busy flag is
+            # authoritative when we have it.
+            job_str = "RUNNING JOB" if has_job or svc_status == "busy" else "-"
             print(f"{name:<24} {svc_status:<16} {job_str}")
 
 
@@ -548,8 +776,23 @@ def clean(org: Org = None) -> None:
 
 
 @app.command()
-def remove(token: Token = None, org: Org = None) -> None:
+def remove(
+    token: Token = None,
+    org: Org = None,
+    purge: Annotated[
+        bool,
+        typer.Option(
+            "--purge",
+            help="Also delete the runner accounts, homes and bind mount.",
+        ),
+    ] = False,
+) -> None:
     """Unregister runners from GitHub and remove services.
+
+    By default this leaves the accounts and their homes in place, so a
+    subsequent `setup` reuses them. `--purge` removes everything the tool
+    created — accounts, homes, subuid entries and the bind mount — which is
+    what a clean-rebuild test needs.
 
     If --token is omitted, automatically fetches one via gh CLI.
     """
@@ -587,10 +830,49 @@ def remove(token: Token = None, org: Org = None) -> None:
             )
 
             print(f"  Removing {rdir}...")
-            shutil.rmtree(rdir, onexc=_rmtree_readonly)
+            if o.runner_user:
+                # Remove as the owner. rmtree from the operator (or root, via
+                # the sudo wrapper) can partially fail and leave root-owned
+                # strays the runner cannot clean — the same failure mode that
+                # broke _work.
+                from gh_runners.privilege import as_user
+
+                as_user(o.runner_user, ["rm", "-rf", str(rdir)], check=False)
+            else:
+                shutil.rmtree(rdir, onexc=_rmtree_readonly)
             print(f"  {name} removed.")
 
+    if purge and is_linux():
+        _purge_hosts(cfg, org)
+
     print("\nAll runners removed.")
+
+
+def _purge_hosts(cfg: Config, org_name: str | None) -> None:
+    """Remove the accounts, homes and mount that `setup` provisioned."""
+    from gh_runners.provision import (
+        RUNNER_HOME_ROOT,
+        remove_bind_mount,
+        remove_user,
+    )
+
+    print("\nPurging host provisioning...")
+    for o in _select_orgs(cfg, org_name):
+        if remove_user(o):
+            print(f"  {o.runner_user}: account, home and subuid entries removed")
+
+    # Only drop the shared mount once no org still needs it.
+    remaining = [o for o in cfg.orgs if o.isolated and priv_user_exists(o.runner_user)]
+    if not remaining and cfg.runner_home_real:
+        real = Path(cfg.runner_home_real)
+        if remove_bind_mount(real, RUNNER_HOME_ROOT):
+            print(f"  bind mount {RUNNER_HOME_ROOT} removed")
+
+
+def priv_user_exists(user: str) -> bool:
+    from gh_runners.privilege import user_exists
+
+    return user_exists(user)
 
 
 @app.command()

@@ -102,23 +102,37 @@ def _rust_env(tc_dir: Path) -> dict[str, str]:
 
 def _install_rust(tc_dir: Path, arch: str, cfg: dict[str, Any]) -> None:
     version: str = cfg.get("version", "1.86.0")
+    # Extra toolchains to install alongside the default, e.g. a version some
+    # repos pin via rust-toolchain.toml. Pre-installing them keeps the first
+    # CI job that needs one from paying the download — and, more importantly,
+    # stops several concurrent jobs racing to install into the shared
+    # RUSTUP_HOME (the same failure mode the pnpm preinstall exists to avoid).
+    extra: list[str] = list(cfg.get("extra_versions", []))
+    # Components every toolchain gets. rust-toolchain.toml can request these
+    # per-repo, but rustup then fetches them on first use — inside a CI job,
+    # concurrently, into shared state. Declaring them here makes the install
+    # deterministic. llvm-tools-preview in particular is needed by
+    # cargo-llvm-cov, which several repos use for coverage.
+    components: list[str] = list(cfg.get("components", []))
     rh = rustup_home(tc_dir)
     ch = cargo_home(tc_dir)
     env = _rust_env(tc_dir)
 
+    def _install_toolchain(rustup: str, ver: str, *, default: bool) -> None:
+        args = [rustup, "toolchain", "install", ver]
+        for comp in components:
+            args += ["-c", comp]
+        run_cmd(args, check=False, env=env)
+        if default:
+            run_cmd([rustup, "default", ver], check=False, env=env)
+
     rustup_bin = ch / "bin" / "rustup"
     if rustup_bin.exists():
         print(f"  rust: updating to {version}...")
-        run_cmd(
-            [str(rustup_bin), "toolchain", "install", version],
-            check=False,
-            env=env,
-        )
-        run_cmd(
-            [str(rustup_bin), "default", version],
-            check=False,
-            env=env,
-        )
+        _install_toolchain(str(rustup_bin), version, default=True)
+        for ver in extra:
+            print(f"  rust: installing extra toolchain {ver}...")
+            _install_toolchain(str(rustup_bin), ver, default=False)
     else:
         print(f"  rust: installing {version}...")
         rh.mkdir(parents=True, exist_ok=True)
@@ -148,6 +162,20 @@ def _install_rust(tc_dir: Path, arch: str, cfg: dict[str, Any]) -> None:
             env=env,
         )
         (tc_dir / "rustup-init.sh").unlink(missing_ok=True)
+
+        # rustup-init only laid down the default toolchain; add the declared
+        # components and any extra versions now.
+        rustup_bin = ch / "bin" / "rustup"
+        if rustup_bin.exists():
+            if components:
+                run_cmd(
+                    [str(rustup_bin), "component", "add", *components],
+                    check=False,
+                    env=env,
+                )
+            for ver in extra:
+                print(f"  rust: installing extra toolchain {ver}...")
+                _install_toolchain(str(rustup_bin), ver, default=False)
 
     # Install extra targets if specified (e.g. targets = "aarch64-unknown-linux-gnu")
     targets: str = cfg.get("targets", "")

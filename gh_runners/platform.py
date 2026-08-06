@@ -270,6 +270,64 @@ def systemd_service_name(service_prefix: str, idx: int) -> str:
     return f"{service_prefix}@{idx}.service"
 
 
+# When runners get their own unprivileged accounts, `systemctl --user` run by
+# the operator targets the *operator's* manager, not the runner's. Routing
+# every systemd call through this helper means switching to a dedicated user
+# is one change here rather than eight scattered call sites.
+#
+# Both XDG_RUNTIME_DIR and DBUS_SESSION_BUS_ADDRESS are required: with only
+# the former, systemctl cannot reach the user's manager and fails in a way
+# that looks like the service is missing. (Probe 2's first run hit exactly
+# this — see docs/runner-isolation.md §3.)
+_RUNNER_USER_ENV_VAR = "GH_RUNNERS_USER"
+
+
+def runner_user() -> str | None:
+    """The dedicated account runners execute as, if configured.
+
+    ``None`` means the legacy model: runners run as the invoking user.
+    """
+    return os.environ.get(_RUNNER_USER_ENV_VAR) or None
+
+
+def systemctl_user(*args: str) -> subprocess.CompletedProcess[str]:
+    """Run `systemctl --user ...` against the runner's systemd manager."""
+    user = runner_user()
+    if user is None:
+        return run_cmd(["systemctl", "--user", *args])
+
+    # pwd is Unix-only; import lazily so this module still imports on Windows,
+    # where the dedicated-user model does not apply (native services instead).
+    import pwd
+
+    uid = pwd.getpwnam(user).pw_uid
+    return run_cmd(
+        [
+            "sudo",
+            "-u",
+            user,
+            "-H",
+            "env",
+            f"XDG_RUNTIME_DIR=/run/user/{uid}",
+            f"DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{uid}/bus",
+            "systemctl",
+            "--user",
+            *args,
+        ]
+    )
+
+
+def systemd_user_dir() -> Path:
+    """Directory holding the runner's systemd user units."""
+    user = runner_user()
+    if user is None:
+        return Path.home() / ".config" / "systemd" / "user"
+
+    import pwd  # Unix-only; see systemctl_user()
+
+    return Path(pwd.getpwnam(user).pw_dir) / ".config" / "systemd" / "user"
+
+
 def install_systemd_service(
     service_prefix: str,
     org_name: str,
@@ -320,24 +378,34 @@ WantedBy=default.target
         run_cmd(["loginctl", "enable-linger", user], check=False)
 
 
-def start_service(service_prefix: str, idx: int) -> None:
+def _systemctl(action: str, service_prefix: str, idx: int, user: str | None) -> None:
+    """`systemctl --user <action>` against the right user's manager.
+
+    Without ``user`` this targets the *invoking* user's systemd instance. That
+    was correct while runners ran as the operator; with dedicated accounts it
+    silently acts on the wrong manager and reports success having done
+    nothing.
+    """
+    if is_windows():
+        return
+    unit = systemd_service_name(service_prefix, idx)
+    if user is None:
+        run_cmd(["systemctl", "--user", action, unit], check=False)
+        return
+
+    from gh_runners.privilege import systemctl_user
+
+    systemctl_user(user, action, unit)
+
+
+def start_service(service_prefix: str, idx: int, user: str | None = None) -> None:
     """Start a runner service (Linux/macOS only — see win_start_service for Windows)."""
-    if is_windows():
-        return
-    run_cmd(
-        ["systemctl", "--user", "start", systemd_service_name(service_prefix, idx)],
-        check=False,
-    )
+    _systemctl("start", service_prefix, idx, user)
 
 
-def stop_service(service_prefix: str, idx: int) -> None:
+def stop_service(service_prefix: str, idx: int, user: str | None = None) -> None:
     """Stop a runner service (Linux/macOS only — see win_stop_service for Windows)."""
-    if is_windows():
-        return
-    run_cmd(
-        ["systemctl", "--user", "stop", systemd_service_name(service_prefix, idx)],
-        check=False,
-    )
+    _systemctl("stop", service_prefix, idx, user)
 
 
 def service_status(
