@@ -23,6 +23,7 @@ Two rules shape everything here:
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
@@ -30,6 +31,7 @@ from pathlib import Path
 
 from gh_runners import privilege as priv
 from gh_runners.config import Config, OrgConfig
+from gh_runners.platform import run_cmd
 
 
 class State(Enum):
@@ -422,6 +424,109 @@ def check_services(org: OrgConfig, report: Report) -> None:
             report.add(f"{org.name}/{unit}", State.DRIFT, active or "inactive", start)
 
 
+def gh_org_from_url(url: str) -> str | None:
+    """Extract the org slug from a GitHub org URL."""
+    parts = url.rstrip("/").split("/")
+    if len(parts) >= 4 and "github.com" in parts[2]:
+        return parts[3]
+    return None
+
+
+def github_runner_state(org: OrgConfig) -> dict[str, str]:
+    """Map runner name -> "online" / "offline" / "busy", per GitHub.
+
+    GitHub is authoritative for whether a runner can be dispatched work: a
+    local unit can be perfectly healthy while its session is gone. Returns
+    {} if the gh CLI is unavailable or the call fails, so callers can tell
+    "could not ask" apart from "asked, and this runner is unknown".
+    """
+    gh_org = gh_org_from_url(org.url)
+    if not gh_org:
+        return {}
+    result = run_cmd(
+        ["gh", "api", f"orgs/{gh_org}/actions/runners", "--paginate"],
+        capture=True,
+        check=False,
+    )
+    if result.returncode != 0 or not result.stdout.strip():
+        return {}
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return {}
+    runners = payload.get("runners", []) if isinstance(payload, dict) else []
+    return {
+        r["name"]: ("busy" if r.get("busy") else r.get("status", "?"))
+        for r in runners
+        if isinstance(r, dict) and "name" in r
+    }
+
+
+def check_registration(org: OrgConfig, report: Report) -> None:
+    """Each running runner is one GitHub can actually dispatch work to.
+
+    Every other check here is host-local, and a host can be entirely correct
+    while the fleet is dead: the runner process holds a session with GitHub,
+    and when that session drops the unit stays ``active`` with nothing to
+    show for it. `doctor` reported "everything matches the desired state"
+    against a fleet where six of ten runners were unreachable and three held
+    job slots they could not service.
+
+    GitHub is the only source for this, so the check degrades rather than
+    fails when it cannot be reached — an unreachable API is not a broken
+    host, and reporting it as DRIFT would invite a repair that fixes nothing.
+    """
+    if not org.isolated:
+        return
+    u = org.runner_user
+    if not priv.user_exists(u):
+        return
+
+    state = github_runner_state(org)
+    if not state:
+        report.add(
+            f"{org.name}/registration",
+            State.INFO,
+            "could not reach GitHub — registration not verified",
+        )
+        return
+
+    for i in range(1, org.runner_count + 1):
+        name = org.runner_name(i)
+        unit = f"{org.service_prefix}@{i}.service"
+        active = priv.systemctl_user(u, "is-active", unit).stdout.strip() == "active"
+        gh = state.get(name)
+
+        if not active:
+            # check_services already reports the stopped unit; adding a second
+            # finding for the same cause would double-count the repair.
+            continue
+
+        if gh is None:
+            report.add(
+                f"{org.name}/{name}",
+                State.DRIFT,
+                "unit active but GitHub has no such runner — never registered",
+                _restart(u, unit),
+            )
+        elif gh == "offline":
+            report.add(
+                f"{org.name}/{name}",
+                State.DRIFT,
+                "unit active but GitHub reports offline — session lost",
+                _restart(u, unit),
+            )
+
+
+def _restart(user: str, unit: str) -> Repair:
+    """Restart a unit to force re-registration."""
+
+    def repair() -> object:
+        return priv.systemctl_user(user, "restart", unit)
+
+    return repair
+
+
 # Every check, in dependency order — an account must exist before its podman
 # can work, so a failure early makes later results meaningless.
 #
@@ -454,6 +559,8 @@ ALL_CHECKS: tuple[Callable[[OrgConfig, Path, Report], None], ...] = (
     _ignoring_tc_dir(check_work_writable),
     _ignoring_tc_dir(check_caches_warm),
     _ignoring_tc_dir(check_services),
+    # Last: it asks GitHub about units the previous check has just settled.
+    _ignoring_tc_dir(check_registration),
 )
 
 

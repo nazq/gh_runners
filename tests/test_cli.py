@@ -8,13 +8,15 @@ inactive.
 
 from __future__ import annotations
 
+import json
+
 from pathlib import Path
 from typing import Any
 
 import pytest
 from typer.testing import CliRunner
 
-from gh_runners import cli
+from gh_runners import cli, reconcile
 from tests.conftest import FakeRun
 
 runner = CliRunner()
@@ -35,13 +37,13 @@ class TestGhOrgFromUrl:
         ],
     )
     def test_extracts_the_org(self, url: str, expected: str) -> None:
-        assert cli._gh_org_from_url(url) == expected
+        assert reconcile.gh_org_from_url(url) == expected
 
     @pytest.mark.parametrize(
         "url", ["https://gitlab.com/MyOrg", "not-a-url", "https://github.com"]
     )
     def test_returns_none_for_anything_else(self, url: str) -> None:
-        assert cli._gh_org_from_url(url) is None
+        assert reconcile.gh_org_from_url(url) is None
 
 
 class TestDirSizeHuman:
@@ -75,23 +77,23 @@ class TestGithubRunnerState:
             "actions/runners",
             stdout='{"runners":[{"name":"ghr-test-1","status":"online","busy":false}]}',
         )
-        assert cli._github_runner_state(org) == {"ghr-test-1": "online"}
+        assert reconcile.github_runner_state(org) == {"ghr-test-1": "online"}
 
     def test_busy_wins_over_status(self, fake_run: FakeRun, org: Any) -> None:
         fake_run.when(
             "actions/runners",
             stdout='{"runners":[{"name":"ghr-test-1","status":"online","busy":true}]}',
         )
-        assert cli._github_runner_state(org)["ghr-test-1"] == "busy"
+        assert reconcile.github_runner_state(org)["ghr-test-1"] == "busy"
 
     def test_empty_on_api_failure(self, fake_run: FakeRun, org: Any) -> None:
         """A failed lookup must not be mistaken for 'no runners'."""
         fake_run.when("actions/runners", returncode=1)
-        assert cli._github_runner_state(org) == {}
+        assert reconcile.github_runner_state(org) == {}
 
     def test_empty_on_malformed_json(self, fake_run: FakeRun, org: Any) -> None:
         fake_run.when("actions/runners", stdout="not json at all")
-        assert cli._github_runner_state(org) == {}
+        assert reconcile.github_runner_state(org) == {}
 
 
 class TestStatus:
@@ -121,14 +123,36 @@ class TestStatus:
         assert "online" in result.stdout
         assert "GitHub" in result.stdout, "must name the source it used"
 
-    def test_uses_systemd_when_root(
+    def test_shows_both_sources_when_root(
         self, fake_run: FakeRun, as_root: None, fake_uid: None
     ) -> None:
+        """Root can read systemd, but systemd cannot see registration.
+
+        Reporting only the local answer is what let `status` call a fleet
+        healthy while GitHub could not dispatch to any of it.
+        """
         fake_run.when("is-active", stdout="active\n")
         result = runner.invoke(cli.app, ["status"])
         assert result.exit_code == 0
         assert "active" in result.stdout
-        assert "systemd" in result.stdout
+        assert "Local" in result.stdout
+        assert "GitHub" in result.stdout
+
+    def test_flags_a_runner_active_locally_but_offline_on_github(
+        self, fake_run: FakeRun, as_root: None, fake_uid: None
+    ) -> None:
+        """The exact split-brain that stalled the queue: the unit is running,
+        so every local check passes, but GitHub will never dispatch to it."""
+        fake_run.when("is-active", stdout="active\n")
+        fake_run.when(
+            "actions/runners",
+            stdout=json.dumps(
+                {"runners": [{"name": "ghr-test-1", "status": "offline"}]}
+            ),
+        )
+        result = runner.invoke(cli.app, ["status"])
+        assert result.exit_code == 0
+        assert "LOST REGISTRATION" in result.stdout
 
     def test_survives_an_unreadable_runner_directory(
         self, fake_run: FakeRun, as_operator: None, monkeypatch: pytest.MonkeyPatch

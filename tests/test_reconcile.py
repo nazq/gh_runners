@@ -8,6 +8,8 @@ worse than no check — it once reported twenty online runners as drift, and
 
 from __future__ import annotations
 
+import json
+
 from pathlib import Path
 from typing import Any
 
@@ -350,3 +352,116 @@ class TestCheckRegistry:
         monkeypatch.setattr(rec, "ALL_CHECKS", registry)
         rec.observe(cfg, tmp_path)
         assert seen == list(range(len(registry)))
+
+
+class TestCheckRegistration:
+    """The gap that let `doctor` pass a dead fleet.
+
+    Every other check is host-local. A runner holds a session with GitHub,
+    and when that session drops the unit stays `active` with nothing to show
+    for it — so a host can be entirely correct while none of its runners can
+    be given work.
+    """
+
+    def _online(self, fake: FakeRun, *names: str) -> None:
+        fake.when(
+            "actions/runners",
+            stdout=json.dumps(
+                {"runners": [{"name": n, "status": "online"} for n in names]}
+            ),
+        )
+
+    def test_active_and_online_is_clean(
+        self, fake_run: FakeRun, org: Any, report: Report, fake_uid: None
+    ) -> None:
+        fake_run.when("is-active", stdout="active\n")
+        self._online(fake_run, *(org.runner_name(i) for i in range(1, 3)))
+        rec.check_registration(org, report)
+        assert report.drift == []
+
+    def test_active_but_offline_is_drift(
+        self, fake_run: FakeRun, org: Any, report: Report, fake_uid: None
+    ) -> None:
+        """systemd says active, GitHub says offline: unreachable for dispatch."""
+        fake_run.when("is-active", stdout="active\n")
+        fake_run.when(
+            "actions/runners",
+            stdout=json.dumps(
+                {
+                    "runners": [
+                        {"name": org.runner_name(i), "status": "offline"}
+                        for i in range(1, org.runner_count + 1)
+                    ]
+                }
+            ),
+        )
+        rec.check_registration(org, report)
+        assert len(report.drift) == org.runner_count
+        assert "session lost" in report.drift[0].detail
+
+    def test_active_but_unknown_to_github_is_drift(
+        self, fake_run: FakeRun, org: Any, report: Report, fake_uid: None
+    ) -> None:
+        fake_run.when("is-active", stdout="active\n")
+        self._online(fake_run, "some-other-runner")
+        rec.check_registration(org, report)
+        assert len(report.drift) == org.runner_count
+        assert "never registered" in report.drift[0].detail
+
+    def test_stopped_unit_is_not_double_counted(
+        self, fake_run: FakeRun, org: Any, report: Report, fake_uid: None
+    ) -> None:
+        """check_services already reports it; two findings would mean two
+        repairs for one cause."""
+        fake_run.when("is-active", stdout="inactive\n")
+        self._online(fake_run)
+        rec.check_registration(org, report)
+        assert report.drift == []
+
+    def test_unreachable_api_degrades_to_info(
+        self, fake_run: FakeRun, org: Any, report: Report, fake_uid: None
+    ) -> None:
+        """An unreachable API is not a broken host. Reporting DRIFT would
+        invite --fix to restart a fleet that is fine."""
+        fake_run.when("is-active", stdout="active\n")
+        fake_run.when("actions/runners", returncode=1)
+        rec.check_registration(org, report)
+        assert report.drift == []
+        assert len(report.info) == 1
+        assert report.clean
+
+    def test_repair_restarts_the_unit(
+        self, fake_run: FakeRun, org: Any, report: Report, fake_uid: None
+    ) -> None:
+        fake_run.when("is-active", stdout="active\n")
+        self._online(fake_run, "some-other-runner")
+        rec.check_registration(org, report)
+        report.drift[0].repair()
+        assert fake_run.ran("restart")
+
+    def test_non_github_url_yields_no_state(
+        self, fake_run: FakeRun, org: Any, report: Report, fake_uid: None
+    ) -> None:
+        """A self-hosted GHES org has no api.github.com to ask."""
+        org.url = "https://git.example.com/TestOrg"
+        assert rec.github_runner_state(org) == {}
+
+    def test_skips_non_isolated_orgs(
+        self, fake_run: FakeRun, org: Any, report: Report
+    ) -> None:
+        """Shared runners have no per-runner identity to reconcile."""
+        org.runner_user = ""
+        rec.check_registration(org, report)
+        assert report.findings == []
+
+    def test_skips_when_the_runner_user_is_absent(
+        self,
+        fake_run: FakeRun,
+        org: Any,
+        report: Report,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Nothing is set up yet — check_user reports that, not this."""
+        monkeypatch.setattr(rec.priv, "user_exists", lambda user: False)
+        rec.check_registration(org, report)
+        assert report.findings == []

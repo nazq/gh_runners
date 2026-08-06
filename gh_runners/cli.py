@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 import shutil
 import subprocess
@@ -18,6 +17,7 @@ import typer
 
 from gh_runners.check_host import cmd_check_host
 from gh_runners.config import Config, OrgConfig, load_config
+from gh_runners.reconcile import gh_org_from_url, github_runner_state
 from gh_runners.platform import (
     config_script,
     default_labels,
@@ -73,15 +73,8 @@ def _select_orgs(cfg: Config, org_name: str | None) -> list[OrgConfig]:
     raise typer.Exit(1)
 
 
-def _gh_org_from_url(url: str) -> str | None:
-    parts = url.rstrip("/").split("/")
-    if len(parts) >= 4 and "github.com" in parts[2]:
-        return parts[3]
-    return None
-
-
 def _fetch_token_via_gh(org_url: str) -> str | None:
-    gh_org = _gh_org_from_url(org_url)
+    gh_org = gh_org_from_url(org_url)
     if gh_org is None:
         return None
     result = run_cmd(
@@ -113,7 +106,7 @@ def _resolve_token(token: str | None, org: OrgConfig) -> str:
         print("  Got registration token via gh CLI.")
         return fetched
 
-    gh_org = _gh_org_from_url(org.url) or org.name
+    gh_org = gh_org_from_url(org.url) or org.name
     print(f"\n  ERROR: No registration token for {org.name}.")
     print("  Provide one of:")
     print(f"    gh-runners setup --token TOKEN --org {org.name}")
@@ -180,36 +173,6 @@ def priv_systemctl_user(user: str, *args: str) -> subprocess.CompletedProcess[st
     from gh_runners.privilege import systemctl_user
 
     return systemctl_user(user, *args)
-
-
-def _github_runner_state(org: OrgConfig) -> dict[str, str]:
-    """Map runner name -> "online"/"offline"/"busy", per GitHub.
-
-    Used when the operator cannot read the runners' own systemd manager.
-    This is the more truthful source anyway: it reports whether GitHub can
-    actually dispatch work, which is the question `status` is really asking.
-    Returns {} if the gh CLI is unavailable or the call fails.
-    """
-    gh_org = _gh_org_from_url(org.url)
-    if not gh_org:
-        return {}
-    result = run_cmd(
-        ["gh", "api", f"orgs/{gh_org}/actions/runners", "--paginate"],
-        capture=True,
-        check=False,
-    )
-    if result.returncode != 0 or not result.stdout.strip():
-        return {}
-    try:
-        payload = json.loads(result.stdout)
-    except json.JSONDecodeError:
-        return {}
-    runners = payload.get("runners", []) if isinstance(payload, dict) else []
-    return {
-        r["name"]: ("busy" if r.get("busy") else r.get("status", "?"))
-        for r in runners
-        if isinstance(r, dict) and "name" in r
-    }
 
 
 def _get_active_runners(cfg: Config, org_name: str | None) -> list[str]:
@@ -713,18 +676,26 @@ def status(org: Org = None) -> None:
     """Show status of all runner services."""
     cfg = load_config()
     for o in _select_orgs(cfg, org):
-        # Without root we cannot read the runners' systemd manager, so ask
-        # GitHub instead of reporting a state we cannot observe.
-        gh_state = (
-            _github_runner_state(o)
-            if o.runner_user and not is_windows() and not _is_root()
-            else {}
-        )
+        # Always ask GitHub, root or not. Registration is a fact only GitHub
+        # holds: a unit can be `active` while GitHub has lost the runner's
+        # session, and that runner cannot be dispatched work no matter how
+        # healthy it looks locally. Root sees systemd and would otherwise
+        # report those as fine — which is exactly the case that stalled a
+        # queue for 30 minutes while every local signal read green.
+        # Ask GitHub for isolated orgs whether or not we are root. Registration
+        # is a fact only GitHub holds: a unit can be `active` while GitHub has
+        # lost the runner's session, and that runner cannot be dispatched work
+        # however healthy it looks locally. Root sees systemd and would
+        # otherwise call those fine — the case that stalled a queue for 30
+        # minutes while every local signal read green.
+        #
+        # Non-isolated orgs run under the operator's own systemd manager, so
+        # the local answer is authoritative and the network call is pure cost.
+        gh_state = github_runner_state(o) if o.isolated and not is_windows() else {}
 
         print(f"\n{o.name}")
-        source = "GitHub" if gh_state else "systemd"
-        print(f"{'Runner':<24} {'Status (' + source + ')':<16} {'Active Job'}")
-        print("-" * 55)
+        print(f"{'Runner':<24} {'Local':<12} {'GitHub':<12} {'Active Job'}")
+        print("-" * 66)
 
         for i in range(1, o.runner_count + 1):
             name = o.runner_name(i)
@@ -741,18 +712,17 @@ def status(org: Org = None) -> None:
                 installed = True
 
             if not installed:
-                svc_status = "not set up"
+                local_status = "not set up"
             elif is_windows():
-                svc_status = service_status(o.service_prefix, i, runner_dir=rdir)
-            elif o.runner_user and not is_windows() and not _is_root():
+                local_status = service_status(o.service_prefix, i, runner_dir=rdir)
+            elif o.runner_user and not _is_root():
                 # Isolated runners live in another user's systemd manager. A
                 # bare `systemctl --user` would query the operator's, find no
                 # such unit, and report every healthy runner as "inactive" —
-                # worse than admitting we cannot see. "?" only survives if
-                # the GitHub lookup also failed.
-                svc_status = gh_state.get(name, "?")
+                # worse than admitting we cannot see.
+                local_status = "?"
             elif o.runner_user:
-                svc_status = (
+                local_status = (
                     priv_systemctl_user(
                         o.runner_user,
                         "is-active",
@@ -761,7 +731,11 @@ def status(org: Org = None) -> None:
                     or "inactive"
                 )
             else:
-                svc_status = service_status(o.service_prefix, i)
+                local_status = service_status(o.service_prefix, i)
+
+            # "-" means we asked and GitHub does not know this runner at all,
+            # which is different from "?" (we could not ask).
+            gh_status = gh_state.get(name, "-" if gh_state else "?")
 
             has_job = False
             if is_windows():
@@ -783,8 +757,15 @@ def status(org: Org = None) -> None:
             # pgrep sees other users' processes (/proc is world-readable), so
             # has_job is reliable even unprivileged; GitHub's busy flag is
             # authoritative when we have it.
-            job_str = "RUNNING JOB" if has_job or svc_status == "busy" else "-"
-            print(f"{name:<24} {svc_status:<16} {job_str}")
+            job_str = "RUNNING JOB" if has_job or gh_status == "busy" else "-"
+
+            # The disagreement is the diagnosis: a unit that is active while
+            # GitHub calls the runner offline is unreachable for dispatch, and
+            # neither column alone would say so.
+            note = ""
+            if local_status == "active" and gh_status in ("offline", "-"):
+                note = "  <-- LOST REGISTRATION"
+            print(f"{name:<24} {local_status:<12} {gh_status:<12} {job_str}{note}")
 
 
 @app.command()
