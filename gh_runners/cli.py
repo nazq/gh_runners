@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tarfile
 import time
 import zipfile
@@ -275,6 +276,20 @@ def _rmtree_readonly(func: Callable[..., object], path: str, exc: object) -> Non
     func(path)
 
 
+def _rmtree(path: Path) -> None:
+    """shutil.rmtree with the read-only handler, on 3.11 as well as 3.12+.
+
+    The handler keyword was renamed from ``onerror`` to ``onexc`` in 3.12,
+    and passing the new name to an older interpreter raises TypeError. The
+    callback signature is the same for both, so only the keyword differs.
+    This package supports >=3.11, so it has to work on both.
+    """
+    if sys.version_info >= (3, 12):
+        shutil.rmtree(path, onexc=_rmtree_readonly)
+    else:
+        shutil.rmtree(path, onerror=_rmtree_readonly)
+
+
 def _clean_work_dirs(cfg: Config, org_name: str | None) -> None:
     """Wipe each runner's _work.
 
@@ -300,7 +315,7 @@ def _clean_work_dirs(cfg: Config, org_name: str | None) -> None:
             if user is None:
                 if work_dir.exists():
                     size = _dir_size_human(work_dir)
-                    shutil.rmtree(work_dir, onexc=_rmtree_readonly)
+                    _rmtree(work_dir)
                     work_dir.mkdir()
                     print(f"  {name}/_work cleaned (was {size})")
                 continue
@@ -839,7 +854,7 @@ def remove(
 
                 as_user(o.runner_user, ["rm", "-rf", str(rdir)], check=False)
             else:
-                shutil.rmtree(rdir, onexc=_rmtree_readonly)
+                _rmtree(rdir)
             print(f"  {name} removed.")
 
     if purge and is_linux():

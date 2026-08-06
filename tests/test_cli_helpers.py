@@ -7,6 +7,7 @@ empty, or an archive re-downloaded on every run.
 
 from __future__ import annotations
 
+import sys
 import tarfile
 import zipfile
 from pathlib import Path
@@ -135,3 +136,43 @@ class TestRmtreeReadonly:
         removed: list[str] = []
         cli._rmtree_readonly(lambda p: removed.append(p), str(victim), None)
         assert removed == [str(victim)]
+
+
+class TestRmtreeAcrossPythonVersions:
+    """`shutil.rmtree`'s handler keyword was renamed in 3.12.
+
+    This package supports >=3.11, and passing the 3.12 name to an older
+    interpreter raises TypeError — so `remove` and `clean` crashed outright
+    on 3.11 for any org without a dedicated account.
+    """
+
+    def test_removes_the_tree(self, tmp_path: Path) -> None:
+        victim = tmp_path / "tree" / "nested"
+        victim.mkdir(parents=True)
+        (victim / "f").write_text("x")
+        cli._rmtree(tmp_path / "tree")
+        assert not (tmp_path / "tree").exists()
+
+    def test_removes_read_only_files(self, tmp_path: Path) -> None:
+        """Git object files are written read-only; without the handler
+        rmtree cannot remove them on Windows."""
+        tree = tmp_path / "tree"
+        tree.mkdir()
+        ro = tree / "readonly"
+        ro.write_text("x")
+        ro.chmod(0o444)
+        cli._rmtree(tree)
+        assert not tree.exists()
+
+    def test_uses_the_keyword_the_interpreter_accepts(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seen: list[str] = []
+
+        def _spy(path: object, **kwargs: object) -> None:
+            seen.extend(kwargs)
+
+        monkeypatch.setattr(cli.shutil, "rmtree", _spy)
+        cli._rmtree(tmp_path)
+        expected = "onexc" if sys.version_info >= (3, 12) else "onerror"
+        assert seen == [expected]
