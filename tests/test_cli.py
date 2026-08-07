@@ -109,7 +109,7 @@ class TestStatus:
         monkeypatch.setattr(Path, "exists", lambda self: True)
 
     def test_falls_back_to_github_without_root(
-        self, fake_run: FakeRun, as_operator: None
+        self, fake_run: FakeRun, as_operator: None, fake_uid: None
     ) -> None:
         """A bare `systemctl --user` queries the *operator's* manager, which
         has no runner units — so it reported every healthy runner inactive."""
@@ -154,8 +154,39 @@ class TestStatus:
         assert result.exit_code == 0
         assert "LOST REGISTRATION" in result.stdout
 
+    def test_says_unknown_when_it_cannot_ask_the_runner(
+        self, fake_run: FakeRun, as_operator: None, fake_uid: None
+    ) -> None:
+        """Without the ability to impersonate, the local state is genuinely
+        unknown. Saying "?" is the honest answer; the previous code reported
+        "not set up" for runners that were online and working."""
+        fake_run.when("sudo -n -u ghr-test true", returncode=1)
+        fake_run.when(
+            "actions/runners",
+            stdout=json.dumps(
+                {"runners": [{"name": "ghr-test-1", "status": "online"}]}
+            ),
+        )
+        result = runner.invoke(cli.app, ["status"])
+        assert result.exit_code == 0
+        assert "not set up" not in result.stdout
+        assert "?" in result.stdout
+
+    def test_reports_the_runners_own_systemd_state(
+        self, fake_run: FakeRun, as_operator: None, fake_uid: None
+    ) -> None:
+        """When impersonation works, ask the runner's manager — a bare
+        `systemctl --user` reaches the operator's and finds nothing."""
+        fake_run.when("is-active", stdout="active\n")
+        result = runner.invoke(cli.app, ["status"])
+        assert "active" in result.stdout
+
     def test_survives_an_unreadable_runner_directory(
-        self, fake_run: FakeRun, as_operator: None, monkeypatch: pytest.MonkeyPatch
+        self,
+        fake_run: FakeRun,
+        as_operator: None,
+        fake_uid: None,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Runner homes are drwx------, so Path.exists() raises rather than
         returning False. That crashed status with a bare traceback."""
@@ -168,7 +199,7 @@ class TestStatus:
         assert result.exit_code == 0
 
     def test_marks_a_busy_runner_as_running_a_job(
-        self, fake_run: FakeRun, as_operator: None
+        self, fake_run: FakeRun, as_operator: None, fake_uid: None
     ) -> None:
         fake_run.when(
             "actions/runners",

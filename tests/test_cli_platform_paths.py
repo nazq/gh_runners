@@ -181,10 +181,33 @@ class TestStatusNotSetUp:
         self,
         fake_run: FakeRun,
         isolated_config: Path,
+        fake_uid: None,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Distinguishing 'never installed' from 'installed and stopped'
-        matters — they need different fixes."""
+        matters — they need different fixes.
+
+        Isolated runners are probed as their owner: Path.exists() from the
+        operator answers False for a drwx------ home that is perfectly
+        fine, which is how ten running runners came to read "not set up".
+        """
         monkeypatch.setattr(Path, "exists", lambda self: False)
+        fake_run.when("test -e", returncode=1)
         result = runner.invoke(cli.app, ["status"])
         assert "not set up" in result.stdout
+
+    def test_a_running_runner_is_never_called_not_set_up(
+        self,
+        fake_run: FakeRun,
+        isolated_config: Path,
+        fake_uid: None,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The regression: the operator cannot stat inside a drwx------
+        home, and that was reported as absence rather than as ignorance."""
+        monkeypatch.setattr(Path, "exists", lambda self: False)
+        fake_run.when("test -e", returncode=0)
+        fake_run.when("is-active", stdout="active\n")
+        result = runner.invoke(cli.app, ["status"])
+        assert "not set up" not in result.stdout
+        assert "active" in result.stdout

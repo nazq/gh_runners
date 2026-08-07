@@ -243,6 +243,12 @@ def priv_as_user(
     return as_user(user, argv, check=check, cwd=cwd)
 
 
+def priv_can_impersonate(user: str) -> bool:
+    from gh_runners.privilege import can_impersonate
+
+    return can_impersonate(user)
+
+
 def priv_exists_as(user: str, path: Path) -> bool:
     from gh_runners.privilege import exists_as
 
@@ -878,25 +884,44 @@ def status(org: Org = None) -> None:
             name = o.runner_name(i)
             rdir = o.runner_dir(i)
 
-            # Runner homes are drwx------, so from the operator a plain
-            # exists() raises PermissionError rather than answering. Asking
-            # as the owner needs root, and `status` is deliberately usable
-            # without it — so treat an unreadable directory as installed and
-            # let systemd, which needs no such access, report the real state.
-            try:
-                installed = rdir.exists()
-            except PermissionError:
-                installed = True
+            # Runner homes are drwx------. From the operator a plain
+            # exists() answers False when a parent is unreadable and raises
+            # PermissionError when the leaf is — neither of which means the
+            # runner is absent. Reporting "not set up" for ten runners that
+            # are demonstrably running is worse than saying nothing.
+            #
+            # Ask the runner instead, the way `setup` does. That needs the
+            # ability to impersonate, so fall back to "?" when we do not
+            # have it rather than guessing.
+            if o.isolated and is_linux():
+                if priv_can_impersonate(o.runner_user):
+                    installed = priv_exists_as(o.runner_user, rdir)
+                else:
+                    installed = True  # unknown; the branch below reports "?"
+            else:
+                try:
+                    installed = rdir.exists()
+                except PermissionError:
+                    installed = True
 
             if not installed:
                 local_status = "not set up"
             elif is_windows():
                 local_status = service_status(o.service_prefix, i, runner_dir=rdir)
+            elif o.runner_user and priv_can_impersonate(o.runner_user):
+                # Query the runner's own systemd manager: a bare
+                # `systemctl --user` reaches the operator's, finds no such
+                # unit, and calls every healthy runner inactive.
+                local_status = (
+                    priv_systemctl_user(
+                        o.runner_user,
+                        "is-active",
+                        f"{o.service_prefix}@{i}.service",
+                    ).stdout.strip()
+                    or "inactive"
+                )
             elif o.runner_user and not _is_root():
-                # Isolated runners live in another user's systemd manager. A
-                # bare `systemctl --user` would query the operator's, find no
-                # such unit, and report every healthy runner as "inactive" —
-                # worse than admitting we cannot see.
+                # Cannot impersonate: say so rather than inventing an answer.
                 local_status = "?"
             elif o.runner_user:
                 local_status = (
