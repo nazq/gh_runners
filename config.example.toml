@@ -36,7 +36,13 @@ poll_interval = 10
 #
 # Each package gets its own sub-table for version + any extra config.
 # Available packages: rust, node, cargo-tools, go, pnpm, bun, pwsh, python
-# Run `gh-runners list-packages` to see all available packages.
+# Run `gh-runners list-packages` to see every package, the version this host
+# would install, and which ones are enabled.
+#
+# rust, node and python accept `extra_versions`: additional versions kept
+# alongside the default, for repos that pin one. Each is installed into its
+# own directory, so a repo pinning an older version and one on the default
+# can build concurrently on the same host.
 
 [toolchain]
 packages = ["rust", "node", "cargo-tools"]
@@ -53,10 +59,18 @@ components = ["rustfmt", "clippy", "rust-analyzer", "rust-docs", "llvm-tools-pre
 # different version via rust-toolchain.toml. Pre-installing avoids the
 # first job paying a ~200MB download, and avoids concurrent jobs racing to
 # install into the shared RUSTUP_HOME.
+# e.g. extra_versions = ["1.92.0"]
 extra_versions = []
 
 [toolchain.node]
+# Installed by fnm, which keeps each version in its own directory and needs
+# no shell hook — the runners execute via systemd with a fixed PATH, so
+# anything requiring `eval "$(fnm env)"` cannot work here.
 version = "22.14.0"
+# Versions repos pin via .nvmrc, .node-version or package.json engines.
+# Installed alongside the default so a job needing one starts warm rather
+# than downloading mid-run, concurrently, into the shared toolchain.
+extra_versions = []
 
 [toolchain.cargo-tools]
 # Space-separated cargo crates to install
@@ -75,8 +89,13 @@ crates = "cargo-llvm-cov just tauri-cli"
 # [toolchain.pwsh]
 # version = "7.5.4"
 #
+# Python interpreters are installed by uv, side by side, on Linux and
+# Windows alike. Without this package the runners use whatever interpreter
+# the host happens to have, so a repo pinning 3.11 silently gets the host's
+# version and fails at import rather than at setup.
 # [toolchain.python]
-# version = "3.12"
+# version = "3.13"
+# extra_versions = ["3.11", "3.12", "3.14"]
 
 # ── Organizations ────────────────────────────────────────────────
 # Define one [[org]] block per GitHub organization.
