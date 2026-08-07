@@ -549,6 +549,13 @@ def setup(
         bool,
         typer.Option("--check", help="Report what would change; change nothing."),
     ] = False,
+    toolchain: Annotated[
+        bool,
+        typer.Option(
+            "--toolchain",
+            help="Install the shared toolchain first, as `setup-toolchain` does.",
+        ),
+    ] = False,
 ) -> None:
     """Download, configure, and install runners.
 
@@ -615,14 +622,33 @@ def setup(
     # On Linux, prepare toolchain env for runner .env files
     tc_dir: Path | None = None
     if is_linux():
-        from gh_runners.toolchain import toolchain_dir, write_runner_env
+        from gh_runners.toolchain import (
+            setup_toolchain as _setup_toolchain,
+        )
+        from gh_runners.toolchain import (
+            toolchain_dir,
+            write_runner_env,
+        )
+
+        if toolchain:
+            # Before the runners: their .env and .path are written from what
+            # the toolchain contains, so installing it afterwards would leave
+            # every runner pointing at a tree that did not exist yet.
+            _setup_toolchain(cfg)
+            print()
 
         tc_dir = toolchain_dir()
         if not tc_dir.exists():
             print(
-                "WARNING: Shared toolchain not found. Run 'gh-runners setup-toolchain' first."
+                "WARNING: Shared toolchain not found. "
+                "Run 'gh-runners setup-toolchain', or pass --toolchain."
             )
             print("Runners will use system PATH (no isolation).\n")
+            missing_toolchain = True
+        else:
+            missing_toolchain = False
+    else:
+        missing_toolchain = False
 
     for o in orgs:
         base = Path(o.base_dir)
@@ -749,6 +775,19 @@ def setup(
     total = sum(o.runner_count for o in orgs)
     print(f"\nSetup complete! {total} runners configured and running.")
     print("They will auto-start on reboot.")
+
+    # Repeat this at the end. Said once, hundreds of lines earlier, it is
+    # missed — and the consequence is silent: the runners come up healthy,
+    # register, go online, and build with whatever toolchain the host
+    # happens to have. Nothing fails until a job picks up a version nobody
+    # chose.
+    if missing_toolchain:
+        print(
+            "\nWARNING: no shared toolchain — these runners use the system "
+            "PATH, not the versions in config.toml."
+        )
+        print("  Fix with: gh-runners setup-toolchain")
+
     print("\nCheck status: gh-runners status")
 
 

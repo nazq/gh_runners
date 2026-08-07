@@ -299,3 +299,87 @@ class TestSetup:
         result = runner.invoke(cli.app, ["setup"])
         assert result.exit_code == 0
         assert "ERROR" in result.stdout
+
+
+class TestSetupToolchainFlag:
+    """`setup --toolchain` folds the two commands into one.
+
+    Ordering is the whole point: each runner's .env and .path are written
+    from what the toolchain contains, so installing it afterwards would
+    leave every runner pointing at a tree that did not exist yet.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _fresh(self, fake_run: FakeRun) -> None:
+        fake_run.when("test -e", returncode=1)
+
+    def test_installs_the_toolchain_when_asked(
+        self,
+        fake_run: FakeRun,
+        isolated_home: Path,
+        quiet_reconcile: None,
+        fake_uid: None,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        called: list[str] = []
+        monkeypatch.setattr(
+            "gh_runners.toolchain.setup_toolchain",
+            lambda cfg: called.append("toolchain"),
+        )
+        runner.invoke(cli.app, ["setup", "--toolchain"])
+        assert called == ["toolchain"]
+
+    def test_does_not_install_it_by_default(
+        self,
+        fake_run: FakeRun,
+        isolated_home: Path,
+        quiet_reconcile: None,
+        fake_uid: None,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The two have always been separate; --toolchain is opt-in."""
+        called: list[str] = []
+        monkeypatch.setattr(
+            "gh_runners.toolchain.setup_toolchain",
+            lambda cfg: called.append("toolchain"),
+        )
+        runner.invoke(cli.app, ["setup"])
+        assert called == []
+
+    def test_installs_it_before_writing_runner_env(
+        self,
+        fake_run: FakeRun,
+        isolated_home: Path,
+        quiet_reconcile: None,
+        fake_uid: None,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        order: list[str] = []
+        monkeypatch.setattr(
+            "gh_runners.toolchain.setup_toolchain",
+            lambda cfg: order.append("toolchain"),
+        )
+        monkeypatch.setattr(
+            "gh_runners.toolchain.write_runner_env",
+            lambda o, d: order.append("env"),
+        )
+        runner.invoke(cli.app, ["setup", "--toolchain"])
+        assert order and order[0] == "toolchain"
+
+    def test_warns_in_the_summary_when_the_toolchain_is_absent(
+        self,
+        fake_run: FakeRun,
+        isolated_home: Path,
+        quiet_reconcile: None,
+        fake_uid: None,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Warned once, hundreds of lines earlier, it is missed — and the
+        consequence is silent: runners build with whatever the host has."""
+        monkeypatch.setattr(
+            "gh_runners.toolchain.toolchain_dir", lambda: Path("/nonexistent-tc")
+        )
+        result = runner.invoke(cli.app, ["setup"])
+        tail = result.stdout[result.stdout.index("Setup complete") :]
+        assert "WARNING" in tail
+        assert "setup-toolchain" in tail

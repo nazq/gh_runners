@@ -81,12 +81,13 @@ cp config.example.toml config.toml
 # 2. Check prerequisites
 gh-runners check-host
 
-# 3. Install isolated toolchain (keeps runners separate from your dev tools)
-gh-runners setup-toolchain
-
-# 4. Setup runners (auto-fetches token via gh CLI, or pass --token)
-gh-runners setup
+# 3. Install the toolchain and the runners in one step.
+#    (--toolchain keeps runners on the versions in config.toml rather than
+#    whatever the host happens to have; omit it if the toolchain is current.)
+gh-runners setup --toolchain
 ```
+
+Run as yourself — never with `sudo`. See [Privileges](#privileges).
 
 ### Windows
 
@@ -119,6 +120,7 @@ All commands support `--org <name>` to target a specific organization.
 | `gh-runners list-packages` | List all available toolchain packages |
 | `gh-runners setup-toolchain` | Install isolated toolchain (Linux) or verify versions (Windows) |
 | `gh-runners setup` | Download, configure, install as services |
+| `gh-runners setup --toolchain` | The above, preceded by `setup-toolchain` |
 | `gh-runners status` | Show all runner service states and active jobs |
 | `gh-runners start` | Start all runner services |
 | `gh-runners stop` | Stop all runner services |
@@ -144,13 +146,23 @@ poll_interval = 10
 
 # Pluggable toolchain — each package gets its own sub-table
 [toolchain]
-packages = ["rust", "node", "cargo-tools"]
+packages = ["rust", "node", "cargo-tools", "python"]
 
+# rust, node and python accept `extra_versions`: additional versions kept
+# alongside the default, for repos that pin one. Each lands in its own
+# directory, so a repo on an older version and one on the default can
+# build concurrently on the same host.
 [toolchain.rust]
-version = "1.88.0"
+version = "1.97"
+extra_versions = ["1.92.0"]
 
-[toolchain.node]
+[toolchain.node]          # installed by fnm
 version = "22.14.0"
+extra_versions = ["20.19.0"]
+
+[toolchain.python]        # installed by uv
+version = "3.13"
+extra_versions = ["3.11", "3.12", "3.14"]
 
 [toolchain.cargo-tools]
 crates = "cargo-llvm-cov just tauri-cli"
@@ -178,7 +190,7 @@ extra_labels = ""
 
 Each package is a TOML sub-table under `[toolchain]`. The `packages` array controls which ones are installed. Run `gh-runners list-packages` to see all available packages and their supported architectures.
 
-Built-in packages: `rust`, `node`, `cargo-tools`, `go`, `pnpm`, `bun`.
+Built-in packages: `rust`, `node`, `cargo-tools`, `go`, `pnpm`, `bun`, `pwsh`, `python`.
 
 > **Note:** Some cargo crates (especially `tauri-cli`) take 15+ minutes to compile on first install. This is normal for Rust — subsequent installs are cached.
 
