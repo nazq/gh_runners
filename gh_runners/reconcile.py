@@ -327,6 +327,15 @@ def _chown_to(user: str, path: Path) -> Repair:
     return repair
 
 
+def _create_as(user: str, path: Path) -> Repair:
+    """A repair that creates ``path``, owned by ``user`` from the start."""
+
+    def repair() -> object:
+        return priv.as_user(user, ["mkdir", "-p", str(path)], check=False)
+
+    return repair
+
+
 def check_work_writable(org: OrgConfig, report: Report) -> None:
     """Each runner can write to its own ``_work``.
 
@@ -348,6 +357,21 @@ def check_work_writable(org: OrgConfig, report: Report) -> None:
         work = org.runner_dir(i) / "_work"
         if not priv.exists_as(u, org.runner_dir(i)):
             continue
+
+        # The runner creates _work on its first job, so a freshly configured
+        # runner has none — which is correct, not drift. Reporting it as
+        # unwritable sent `chown -R` at a path that does not exist, printing
+        # ten "cannot access" errors and then re-reporting the same drift it
+        # had just claimed to repair.
+        if not priv.exists_as(u, work):
+            report.add(
+                f"{org.name}/runner-{i}: _work",
+                State.DRIFT,
+                "missing (created on first job)",
+                _create_as(u, work),
+            )
+            continue
+
         probe = work / ".gh-runners-write-probe"
         # capture=True so the probe's own "Permission denied" goes to us
         # rather than the terminal — a diagnostic should report findings, not

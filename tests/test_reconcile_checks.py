@@ -204,3 +204,76 @@ class TestApplyOrdering:
         repaired, skipped = rec.apply(report)
         assert repaired == 1
         assert skipped == 1
+
+
+class TestWorkDirMissingVsUnwritable:
+    """A missing _work and an unusable _work need different repairs.
+
+    The runner creates _work on its first job, so a freshly configured
+    runner has none. Treating that as "not writable" sent `chown -R` at a
+    path that does not exist: ten "cannot access" errors, a claim of
+    "repaired 20", and the same drift still listed underneath.
+    """
+
+    def test_missing_work_is_reported_as_missing(
+        self, fake_run: FakeRun, org: Any, report: Report, fake_uid: None
+    ) -> None:
+        def _exists(argv: list[str]) -> bool:
+            joined = " ".join(argv)
+            return "test -e" in joined and joined.rstrip().endswith("_work")
+
+        # The runner dir exists; _work does not.
+        fake_run.when(_exists, returncode=1)
+        rec.check_work_writable(org, report)
+        assert report.drift
+        assert "missing" in report.drift[0].detail
+
+    def test_missing_work_is_repaired_by_creating_it(
+        self, fake_run: FakeRun, org: Any, report: Report, fake_uid: None
+    ) -> None:
+        """chown cannot fix a path that is not there."""
+
+        def _exists(argv: list[str]) -> bool:
+            joined = " ".join(argv)
+            return "test -e" in joined and joined.rstrip().endswith("_work")
+
+        fake_run.when(_exists, returncode=1)
+        rec.check_work_writable(org, report)
+        report.drift[0].repair()
+        assert fake_run.ran("mkdir -p")
+        assert not fake_run.ran("chown")
+
+    def test_creates_it_as_the_runner_not_as_root(
+        self, fake_run: FakeRun, org: Any, report: Report, fake_uid: None
+    ) -> None:
+        """A root-created _work is exactly the state this check exists to
+        catch — it would report drift again on the next run."""
+
+        def _exists(argv: list[str]) -> bool:
+            joined = " ".join(argv)
+            return "test -e" in joined and joined.rstrip().endswith("_work")
+
+        fake_run.when(_exists, returncode=1)
+        rec.check_work_writable(org, report)
+        report.drift[0].repair()
+        mkdirs = [ln for ln in fake_run.command_lines if "mkdir -p" in ln]
+        assert mkdirs
+        assert all(f"-u {org.runner_user}" in ln for ln in mkdirs)
+
+    def test_present_but_unwritable_still_chowns(
+        self, fake_run: FakeRun, org: Any, report: Report, fake_uid: None
+    ) -> None:
+        """The original case must keep working: _work exists but is owned by
+        the wrong user, which chown does fix."""
+        fake_run.when("touch", returncode=1)
+        rec.check_work_writable(org, report)
+        assert report.drift
+        assert "not writable" in report.drift[0].detail
+        report.drift[0].repair()
+        assert fake_run.ran("chown")
+
+    def test_writable_work_is_not_drift(
+        self, fake_run: FakeRun, org: Any, report: Report, fake_uid: None
+    ) -> None:
+        rec.check_work_writable(org, report)
+        assert report.drift == []
