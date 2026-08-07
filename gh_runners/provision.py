@@ -255,10 +255,18 @@ def _wait_until_no_processes(user: str, timeout: int | None = None) -> bool:
     """
     deadline = time.monotonic() + (_KILL_TIMEOUT if timeout is None else timeout)
     while time.monotonic() < deadline:
-        if priv.as_root(["pgrep", "-u", user], check=False).returncode != 0:
+        # capture, or pgrep prints matching PIDs straight to the terminal —
+        # a bare number mid-teardown reads as an error code.
+        if _no_processes(user):
             return True
         time.sleep(0.5)
-    return priv.as_root(["pgrep", "-u", user], check=False).returncode != 0
+    return _no_processes(user)
+
+
+def _no_processes(user: str) -> bool:
+    return (
+        priv.as_root(["pgrep", "-u", user], check=False, capture=True).returncode != 0
+    )
 
 
 def remove_bind_mount(real: Path, mount: Path) -> bool:

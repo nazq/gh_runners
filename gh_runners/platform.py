@@ -328,13 +328,90 @@ def systemd_user_dir() -> Path:
     return Path(pwd.getpwnam(user).pw_dir) / ".config" / "systemd" / "user"
 
 
+def _user_unit_path(user: str, service_prefix: str) -> Path:
+    """Where ``user``'s systemd manager reads unit files from.
+
+    Resolved from the account's real home via getent rather than assumed:
+    the home is configurable and moves with runner_home_real.
+    """
+    from gh_runners import privilege as priv
+
+    home = priv.as_user(
+        user, ["sh", "-c", "echo $HOME"], check=False, capture=True
+    ).stdout.strip()
+    if not home:
+        home = f"/srv/gh-runners/{user}"
+    return Path(home) / ".config" / "systemd" / "user" / f"{service_prefix}@.service"
+
+
+def _unit_content(org_name: str, base_dir: Path) -> str:
+    """The template unit body, shared by both install paths."""
+    return f"""[Unit]
+Description=GitHub Actions Runner - {org_name} (%i)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory={base_dir}/runner-%i
+EnvironmentFile={base_dir}/runner-%i/.env
+ExecStart={base_dir}/runner-%i/run.sh
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target
+"""
+
+
+def _install_units_as(
+    user: str, service_prefix: str, org_name: str, base_dir: Path, count: int
+) -> None:
+    """Install the template into ``user``'s own systemd manager."""
+    from gh_runners import privilege as priv
+
+    unit = _user_unit_path(user, service_prefix)
+    # Written by the runner, not by root and chowned after: a root-owned
+    # unit file in a home the runner cannot modify is its own failure mode.
+    priv.write_as(user, unit, _unit_content(org_name, base_dir))
+    priv.systemctl_user(user, "daemon-reload")
+    for i in range(1, count + 1):
+        priv.systemctl_user(user, "enable", systemd_service_name(service_prefix, i))
+
+
+def _uninstall_units_as(user: str, service_prefix: str, count: int) -> None:
+    """Remove the template from ``user``'s systemd manager."""
+    from gh_runners import privilege as priv
+
+    for i in range(1, count + 1):
+        svc = systemd_service_name(service_prefix, i)
+        priv.systemctl_user(user, "stop", svc)
+        priv.systemctl_user(user, "disable", svc)
+
+    unit = _user_unit_path(user, service_prefix)
+    priv.as_user(user, ["rm", "-f", str(unit)], check=False)
+    priv.systemctl_user(user, "daemon-reload")
+
+
 def install_systemd_service(
     service_prefix: str,
     org_name: str,
     base_dir: Path,
     count: int,
+    runner_user: str | None = None,
 ) -> None:
-    """Generate and install a systemd user service template."""
+    """Generate and install a systemd user service template.
+
+    ``runner_user`` names whose systemd manager gets the units. Without it
+    they land in the operator's — ``Path.home()`` and a bare ``systemctl
+    --user`` are both *whoever ran the command*, not the account the
+    services describe. That produced a fleet which registered with GitHub
+    and then sat offline forever: the units existed, in a manager that does
+    not run the runners.
+    """
+    if runner_user:
+        _install_units_as(runner_user, service_prefix, org_name, base_dir, count)
+        return
+
     service_dir = Path.home() / ".config" / "systemd" / "user"
     service_dir.mkdir(parents=True, exist_ok=True)
 
@@ -431,8 +508,18 @@ def service_status(
     return "unknown"
 
 
-def uninstall_systemd_service(service_prefix: str, count: int) -> None:
-    """Disable and remove a systemd user service template."""
+def uninstall_systemd_service(
+    service_prefix: str, count: int, runner_user: str | None = None
+) -> None:
+    """Disable and remove a systemd user service template.
+
+    Must target the same manager :func:`install_systemd_service` wrote to,
+    or it removes nothing and reports success.
+    """
+    if runner_user:
+        _uninstall_units_as(runner_user, service_prefix, count)
+        return
+
     for i in range(1, count + 1):
         svc = systemd_service_name(service_prefix, i)
         run_cmd(["systemctl", "--user", "stop", svc], check=False)

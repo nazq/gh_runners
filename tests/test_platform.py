@@ -200,3 +200,95 @@ class TestServiceControl:
     def test_status_reports_the_systemd_answer(self, fake_run: FakeRun) -> None:
         fake_run.when("is-active", stdout="active\n")
         assert plat.service_status("gh-runner-test", 1) == "active"
+
+
+class TestSystemdUnitOwnership:
+    """Units must land in the runner's systemd manager, not the operator's.
+
+    `Path.home()` and a bare `systemctl --user` are both *whoever ran the
+    command*. Installing there produced a fleet that registered with GitHub
+    and then sat offline forever: the units existed, in a manager that does
+    not run the runners, so nothing ever started them.
+    """
+
+    def test_installs_into_the_runners_own_home(
+        self,
+        fake_run: FakeRun,
+        fake_uid: None,
+        fake_subprocess_run: list[dict[str, object]],
+        tmp_path: Path,
+    ) -> None:
+        fake_run.when("echo $HOME", stdout="/srv/gh-runners/ghr-test\n")
+        plat.install_systemd_service(
+            service_prefix="ghr-test",
+            org_name="TestOrg",
+            base_dir=tmp_path,
+            count=2,
+            runner_user="ghr-test",
+        )
+        assert fake_run.ran("/srv/gh-runners/ghr-test/.config/systemd/user")
+
+    def test_never_touches_the_operators_home(
+        self,
+        fake_run: FakeRun,
+        fake_uid: None,
+        fake_subprocess_run: list[dict[str, object]],
+        tmp_path: Path,
+    ) -> None:
+        fake_run.when("echo $HOME", stdout="/srv/gh-runners/ghr-test\n")
+        plat.install_systemd_service(
+            service_prefix="ghr-test",
+            org_name="TestOrg",
+            base_dir=tmp_path,
+            count=1,
+            runner_user="ghr-test",
+        )
+        assert not any(str(Path.home()) in ln for ln in fake_run.command_lines), (
+            "the operator's systemd manager does not run the runners"
+        )
+
+    def test_enables_as_the_runner_not_the_caller(
+        self,
+        fake_run: FakeRun,
+        fake_uid: None,
+        fake_subprocess_run: list[dict[str, object]],
+        tmp_path: Path,
+    ) -> None:
+        """A bare `systemctl --user enable` reaches the wrong manager."""
+        fake_run.when("echo $HOME", stdout="/srv/gh-runners/ghr-test\n")
+        plat.install_systemd_service(
+            service_prefix="ghr-test",
+            org_name="TestOrg",
+            base_dir=tmp_path,
+            count=1,
+            runner_user="ghr-test",
+        )
+        enables = [ln for ln in fake_run.command_lines if "enable" in ln]
+        assert enables
+        assert all("sudo" in ln and "ghr-test" in ln for ln in enables)
+
+    def test_uninstall_targets_the_same_manager(
+        self,
+        fake_run: FakeRun,
+        fake_uid: None,
+        fake_subprocess_run: list[dict[str, object]],
+    ) -> None:
+        """Removing from a different manager than install wrote to removes
+        nothing and reports success."""
+        fake_run.when("echo $HOME", stdout="/srv/gh-runners/ghr-test\n")
+        plat.uninstall_systemd_service("ghr-test", 2, "ghr-test")
+        assert fake_run.ran("/srv/gh-runners/ghr-test/.config/systemd/user")
+        assert not any(str(Path.home()) in ln for ln in fake_run.command_lines)
+
+    def test_falls_back_to_the_operator_when_not_isolated(
+        self, fake_run: FakeRun, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A shared-runner org has no separate account to install into."""
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "h"))
+        plat.install_systemd_service(
+            service_prefix="shared",
+            org_name="TestOrg",
+            base_dir=tmp_path,
+            count=1,
+        )
+        assert (tmp_path / "h" / ".config" / "systemd" / "user").is_dir()

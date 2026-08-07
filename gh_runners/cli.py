@@ -721,6 +721,7 @@ def setup(
                 org_name=o.name,
                 base_dir=base,
                 count=o.runner_count,
+                runner_user=o.runner_user or None,
             )
             if tc_dir is not None and tc_dir.exists():
                 write_runner_env(o, tc_dir)
@@ -1005,7 +1006,9 @@ def remove(
         print(f"\nRemoving {o.name} runners...")
 
         if is_linux():
-            uninstall_systemd_service(o.service_prefix, o.runner_count)
+            uninstall_systemd_service(
+                o.service_prefix, o.runner_count, o.runner_user or None
+            )
 
         for i in range(1, o.runner_count + 1):
             name = o.runner_name(i)
