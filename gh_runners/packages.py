@@ -141,6 +141,83 @@ def _rust_env(tc_dir: Path) -> dict[str, str]:
 # ---------------------------------------------------------------------------
 
 
+def fetch_verified(url: str, dest: Path, label: str) -> bool:
+    """Download ``url`` to ``dest``. False (and no file) on any failure.
+
+    ``curl -sSL`` without ``--fail`` writes the server's error body to the
+    output file and **exits 0**, so a 404 surfaces far from its cause — as a
+    ``BadZipFile`` or ``ReadError`` traceback naming neither the URL nor the
+    status. That is how a guessed fnm asset name cost an evening.
+    """
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    r = run_cmd(
+        ["curl", "-sSL", "--fail", "-o", str(dest), url], check=False, capture=True
+    )
+    if r.returncode != 0:
+        dest.unlink(missing_ok=True)
+        print(f"  {label}: FAILED to download {url} (curl exit {r.returncode})")
+        return False
+    return True
+
+
+def _extract_tar(archive: Path, dest: Path) -> None:
+    with tarfile.open(archive, "r:gz") as tf:
+        tf.extractall(dest, filter="data")
+
+
+def _extract_zip(archive: Path, dest: Path) -> None:
+    with zipfile.ZipFile(archive) as zf:
+        zf.extractall(dest)
+
+
+def _replace_tree(
+    target: Path, build: Callable[[Path], None], label: str, *, unwrap: bool = False
+) -> None:
+    """Swap ``target`` for a freshly built tree, atomically-ish.
+
+    ``build`` populates a staging directory; only if it succeeds does the
+    old tree go away. The installers used to ``rmtree(target)`` *first* and
+    extract second, so a corrupt download — see :func:`fetch_verified` —
+    destroyed a working toolchain and left the host with no go/bun/pwsh at
+    all until someone re-ran with a corrected version.
+
+    ``unwrap`` is for archives that contain a single top-level directory
+    (go's tarball does; bun's zip is unwrapped by its own builder, and
+    pwsh's tarball extracts flat). Passed explicitly rather than guessed
+    from the contents: "one directory inside" is also what a *correct* flat
+    archive looks like when it happens to hold one folder, and guessing
+    wrong silently relocates the whole install.
+    """
+    staging = target.parent / f".{target.name}.new"
+    backup = target.parent / f".{target.name}.old"
+    shutil.rmtree(staging, ignore_errors=True)
+    staging.mkdir(parents=True, exist_ok=True)
+    try:
+        build(staging)
+        source = staging
+        if unwrap:
+            entries = list(staging.iterdir())
+            if len(entries) != 1 or not entries[0].is_dir():
+                raise RuntimeError(
+                    f"{label}: expected one top-level directory in the archive, "
+                    f"found {[e.name for e in entries]}"
+                )
+            source = entries[0]
+        shutil.rmtree(backup, ignore_errors=True)
+        if target.exists():
+            target.rename(backup)
+        source.rename(target)
+    except Exception:
+        shutil.rmtree(staging, ignore_errors=True)
+        if not target.exists() and backup.exists():
+            backup.rename(target)  # put the working install back
+        print(f"  {label}: install failed; previous version left in place")
+        raise
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+        shutil.rmtree(backup, ignore_errors=True)
+
+
 def _install_rust(tc_dir: Path, arch: str, cfg: dict[str, Any]) -> None:
     version: str = cfg.get("version", "1.86.0")
     # Extra toolchains to install alongside the default, e.g. a version some
@@ -384,15 +461,12 @@ def _install_go(tc_dir: Path, arch: str, cfg: dict[str, Any]) -> None:
 
     print(f"  go: downloading {version} ({go_arch})...")
     tarball_path = tc_dir / tarball
-    run_cmd(["curl", "-sSL", "-o", str(tarball_path), url])
+    if not fetch_verified(url, tarball_path, "go"):
+        return
 
-    if gh.exists():
-        import shutil
-
-        shutil.rmtree(gh)
-
-    with tarfile.open(tarball_path, "r:gz") as tf:
-        tf.extractall(tc_dir)
+    _replace_tree(
+        gh, lambda staging: _extract_tar(tarball_path, staging), "go", unwrap=True
+    )
 
     tarball_path.unlink(missing_ok=True)
     print(f"  go: {version} ready")
@@ -450,28 +524,26 @@ def _install_bun(tc_dir: Path, arch: str, cfg: dict[str, Any]) -> None:
 
     print(f"  bun: downloading {version} ({bun_arch})...")
     zip_path = tc_dir / zipname
-    run_cmd(["curl", "-sSL", "-o", str(zip_path), url])
+    if not fetch_verified(url, zip_path, "bun"):
+        return
 
-    if bh.exists():
-        import shutil
+    def _unpack(staging: Path) -> None:
+        # bun's zip wraps everything in one directory; strip it so the
+        # result is shaped like the tree being replaced.
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            for member in zf.namelist():
+                parts = member.split("/", 1)
+                if len(parts) > 1 and parts[1]:
+                    dest = staging / parts[1]
+                    if member.endswith("/"):
+                        dest.mkdir(parents=True, exist_ok=True)
+                    else:
+                        dest.parent.mkdir(parents=True, exist_ok=True)
+                        dest.write_bytes(zf.read(member))
+                        if parts[1] == "bun":
+                            dest.chmod(0o755)
 
-        shutil.rmtree(bh)
-    bh.mkdir(parents=True)
-
-    import zipfile
-
-    with zipfile.ZipFile(zip_path, "r") as zf:
-        for member in zf.namelist():
-            parts = member.split("/", 1)
-            if len(parts) > 1 and parts[1]:
-                dest = bh / parts[1]
-                if member.endswith("/"):
-                    dest.mkdir(parents=True, exist_ok=True)
-                else:
-                    dest.parent.mkdir(parents=True, exist_ok=True)
-                    dest.write_bytes(zf.read(member))
-                    if parts[1] == "bun":
-                        dest.chmod(0o755)
+    _replace_tree(bh, _unpack, "bun")
 
     zip_path.unlink(missing_ok=True)
     print(f"  bun: {version} ready")
@@ -532,16 +604,13 @@ def _install_pwsh(tc_dir: Path, arch: str, cfg: dict[str, Any]) -> None:
 
         print(f"  pwsh: downloading {version} ({pwsh_arch})...")
         tarball_path = tc_dir / tarball
-        run_cmd(["curl", "-sSL", "-o", str(tarball_path), url])
+        if not fetch_verified(url, tarball_path, "pwsh"):
+            return
 
-        if pwsh_dir.exists():
-            import shutil
-
-            shutil.rmtree(pwsh_dir)
-        pwsh_dir.mkdir(parents=True)
-
-        with tarfile.open(tarball_path, "r:gz") as tf:
-            tf.extractall(pwsh_dir)
+        # pwsh's tarball extracts flat, so no unwrap.
+        _replace_tree(
+            pwsh_dir, lambda staging: _extract_tar(tarball_path, staging), "pwsh"
+        )
 
         # Make pwsh executable
         pwsh_bin.chmod(0o755)

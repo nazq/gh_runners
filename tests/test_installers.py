@@ -10,6 +10,7 @@ from __future__ import annotations
 import tarfile
 import zipfile
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -42,8 +43,21 @@ class _NullTar:
 
 @pytest.fixture
 def no_extract(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Downloads are faked, so there is no archive on disk to open."""
-    monkeypatch.setattr(tarfile, "open", lambda *a, **k: _NullTar())
+    """Downloads are faked, so there is no archive on disk to open.
+
+    The stub still has to *populate* the destination: installs now stage a
+    new tree and swap it in only on success, so an extraction that yields
+    nothing is indistinguishable from the corrupt download that behaviour
+    exists to survive.
+    """
+
+    class _StubTar(_NullTar):
+        def extractall(self, dest: Any = None, **kw: Any) -> None:
+            if dest is not None:
+                # go's tarball wraps everything in a single `go/` directory.
+                (Path(dest) / "go" / "bin").mkdir(parents=True, exist_ok=True)
+
+    monkeypatch.setattr(tarfile, "open", lambda *a, **k: _StubTar())
     monkeypatch.setattr(zipfile, "ZipFile", lambda *a, **k: _NullTar())
 
 

@@ -600,7 +600,9 @@ def apply(report: Report, cfg: Config | None = None) -> tuple[int, int]:
     not actually have. Pass ``cfg`` to restart the affected services.
     """
     repaired = skipped = 0
-    touched_env: set[str] = set()
+    # (org name, runner index) — the specific units whose .env changed, so
+    # only those get restarted.
+    touched_env: set[tuple[str, int]] = set()
 
     for f in report.drift:
         if f.repair is None:
@@ -619,15 +621,57 @@ def apply(report: Report, cfg: Config | None = None) -> tuple[int, int]:
             continue
         repaired += 1
         if ".env" in f.name:
-            touched_env.add(f.name.split("/")[0])
+            # "<org>/runner-<i>: .env" — restart only this unit, not the
+            # whole org. Restarting all of them meant one drifted runner
+            # killed every in-flight job in its org.
+            org_name, _, rest = f.name.partition("/")
+            num = rest.split(":")[0].removeprefix("runner-")
+            if num.isdigit():
+                touched_env.add((org_name, int(num)))
 
     if cfg is not None and touched_env:
         for org in cfg.orgs:
-            if org.name not in touched_env or not org.isolated:
+            if not org.isolated:
                 continue
-            for i in range(1, org.runner_count + 1):
-                priv.systemctl_user(
-                    org.runner_user, "restart", f"{org.service_prefix}@{i}.service"
-                )
+            for _, idx in sorted(t for t in touched_env if t[0] == org.name):
+                unit = f"{org.service_prefix}@{idx}.service"
+                # A restart mid-job kills the job, and this module's own
+                # rule is "repair never destroys work" — a running CI job is
+                # exactly that. `restart` (the command) waits for jobs;
+                # apply used to just fire, so a re-run of setup killed every
+                # in-flight job on the fleet. Skip and report instead: the
+                # .env on disk is already correct, it just is not loaded
+                # yet, so deferring costs nothing.
+                if _runner_is_busy(org, idx):
+                    print(
+                        f"  {org.name}/runner-{idx}: busy, not restarting (.env "
+                        "applies when it next idles)"
+                    )
+                    continue
+                priv.systemctl_user(org.runner_user, "restart", unit)
 
     return repaired, skipped
+
+
+def _runner_is_busy(org: OrgConfig, idx: int) -> bool:
+    """True if this runner is executing a job right now.
+
+    A listener always runs; a *job* means a Runner.Worker child. Absence of
+    evidence is treated as busy — if the probe cannot answer, the safe
+    reading is "might be working", because the cost of being wrong is a
+    killed CI job versus a deferred config reload.
+    """
+    if not org.runner_user:
+        return False
+    rdir = org.runner_dir(idx)
+    r = priv.as_user(
+        org.runner_user,
+        ["pgrep", "-f", f"Runner.Worker.*{rdir}"],
+        check=False,
+        capture=True,
+    )
+    if r.returncode == 0 and r.stdout.strip():
+        return True
+    # pgrep exits 1 for "no match" and >1 for its own failures; only 1 is a
+    # trustworthy "not busy".
+    return r.returncode not in (0, 1)
