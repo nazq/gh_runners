@@ -165,11 +165,6 @@ def _extract_tar(archive: Path, dest: Path) -> None:
         tf.extractall(dest, filter="data")
 
 
-def _extract_zip(archive: Path, dest: Path) -> None:
-    with zipfile.ZipFile(archive) as zf:
-        zf.extractall(dest)
-
-
 def _replace_tree(
     target: Path, build: Callable[[Path], None], label: str, *, unwrap: bool = False
 ) -> None:

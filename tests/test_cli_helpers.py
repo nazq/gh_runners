@@ -210,3 +210,41 @@ class TestRmtreeAcrossPythonVersions:
         cli._rmtree(tmp_path)
         expected = "onexc" if sys.version_info >= (3, 12) else "onerror"
         assert seen == [expected]
+
+
+class TestRunnerInstalled:
+    """The probe that decides whether stop/start/remove act at all.
+
+    A plain Path.exists() here answered False for every isolated runner —
+    the operator cannot stat inside a drwx------ home — so stop stopped
+    nothing and printed "Done." while remove skipped every GitHub
+    unregister and deleted the accounts anyway.
+    """
+
+    def test_isolated_orgs_ask_as_the_runner(
+        self, org: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        asked: list[tuple[str, Path]] = []
+        monkeypatch.setattr(
+            cli, "priv_exists_as", lambda u, p: (asked.append((u, p)), True)[1]
+        )
+        # False would be the operator's answer; the runner's is what counts.
+        monkeypatch.setattr(Path, "exists", lambda self: False)
+        assert cli.runner_installed(org, org.runner_dir(1)) is True
+        assert asked == [("ghr-test", org.runner_dir(1))]
+
+    def test_unisolated_orgs_ask_directly(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from gh_runners.config import OrgConfig
+
+        legacy = OrgConfig(
+            name="L",
+            url="https://github.com/L",
+            runner_group="",
+            runner_count=1,
+            name_prefix="r",
+            service_prefix="s",
+        )
+        monkeypatch.setattr(Path, "exists", lambda self: True)
+        assert cli.runner_installed(legacy, Path("/whatever")) is True

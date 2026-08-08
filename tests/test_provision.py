@@ -119,6 +119,29 @@ class TestEnsureBindMount:
         assert "\\n" not in str(written), "literal backslash-n in fstab"
         assert str(written).endswith("\n"), "missing terminating newline"
 
+    def test_does_not_join_an_unterminated_last_line(
+        self, fake_run: FakeRun, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The old writer left fstab without a trailing newline, so the next
+        append -- by this tool or by an admin -- would concatenate onto that
+        line and produce an unparseable entry."""
+        monkeypatch.setattr(Path, "is_dir", lambda self: True)
+        monkeypatch.setattr(
+            Path, "read_text", lambda self: "UUID=x / ext4 defaults 0 1"
+        )
+        fake_run.when("mountpoint", returncode=0)
+        captured: dict[str, object] = {}
+        monkeypatch.setattr(
+            provision.subprocess,
+            "run",
+            lambda argv, **kw: (
+                captured.__setitem__("input", kw.get("input")),
+                subprocess.CompletedProcess(argv, 0, "", ""),
+            )[1],
+        )
+        provision.ensure_bind_mount(Path("/mnt/real"), Path("/srv/gh-runners"))
+        assert str(captured["input"]).startswith("\n")
+
     def test_fstab_append_failure_is_not_reported_as_success(
         self, fake_run: FakeRun, monkeypatch: pytest.MonkeyPatch
     ) -> None:
