@@ -232,6 +232,45 @@ class TestWriteRunnerEnv:
         tc.write_runner_env(legacy, tmp_path)
         assert (rdir / ".env").exists()
 
+    def test_tmpdir_is_per_runner_not_the_operators(
+        self, tmp_path: Path, fake_run: FakeRun, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """TMPDIR must name a path the *runner* owns.
+
+        This read os.environ["TMPDIR"], so `setup` baked the calling shell's
+        value into every .env. On the real host that is /home/nazq/dev/.tmp,
+        which the ghr-* users cannot write to, and jobs failed wherever a
+        tool honoured TMPDIR rather than RUNNER_TEMP — prost-build died with
+        EACCES mid-`cargo clippy`, taking CI down across every Rust repo.
+        """
+        from gh_runners.config import OrgConfig
+
+        monkeypatch.setenv("TMPDIR", "/home/operator/private")
+        base = tmp_path / "runners"
+        for i in (1, 2):
+            (base / f"runner-{i}").mkdir(parents=True)
+        org = OrgConfig(
+            name="L",
+            url="https://github.com/L",
+            runner_group="",
+            runner_count=2,
+            name_prefix="r",
+            service_prefix="s",
+            base_dir=str(base),
+        )
+        tc.write_runner_env(org, tmp_path)
+
+        for i in (1, 2):
+            rdir = base / f"runner-{i}"
+            env = (rdir / ".env").read_text()
+            assert f"TMPDIR={rdir}/_tmp" in env
+            assert f"TMP={rdir}/_tmp" in env
+            assert f"TEMP={rdir}/_tmp" in env
+            # The operator's own TMPDIR must never leak through.
+            assert "/home/operator/private" not in env
+            # And the directory has to exist, or TMPDIR names nothing.
+            assert (rdir / "_tmp").is_dir()
+
 
 class TestCloudConfig:
     def test_writes_a_credential_helper_for_artifact_registry(

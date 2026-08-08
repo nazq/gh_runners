@@ -219,6 +219,11 @@ _RUNNER_STATE: tuple[tuple[str, tuple[str, ...]], ...] = (
     (".pip", ("PIP_CACHE_DIR",)),
     (".pnpm", ("PNPM_HOME", "PNPM_STORE_DIR")),
     (".gomod", ("GOMODCACHE",)),
+    # TMPDIR/TMP/TEMP point here, but they are written in write_runner_env
+    # rather than derived from this tuple: they share one directory instead
+    # of getting one each. Listed so the directory is still created — on a
+    # fresh runner TMPDIR would otherwise name a path that does not exist.
+    ("_tmp", ()),
 )
 
 # Deliberately NOT set here: PLAYWRIGHT_BROWSERS_PATH. Jobs that need
@@ -264,20 +269,28 @@ def _per_runner_state(rdir: Path) -> list[str]:
 def write_runner_env(org: OrgConfig, tc_dir: Path) -> None:
     """Write .env and .path files for each runner in an org."""
     env = toolchain_env(tc_dir)
-    tmpdir = os.environ.get("TMPDIR", "/tmp")
 
-    env_lines = [f"{k}={v}" for k, v in env.items()]
-    env_lines.extend(
-        [
-            f"TMPDIR={tmpdir}",
-            f"TMP={tmpdir}",
-            f"TEMP={tmpdir}",
-        ]
-    )
+    base_env_lines = [f"{k}={v}" for k, v in env.items()]
     path_contents = env["PATH"]
 
     for i in range(1, org.runner_count + 1):
         rdir = org.runner_dir(i)
+
+        # Each runner gets its own temp, never the operator's. This used to
+        # read TMPDIR from os.environ, which meant `setup` baked the calling
+        # shell's value into all ten .env files — on this host that is
+        # /home/nazq/dev/.tmp, which the ghr-* users cannot write to. Jobs
+        # then failed wherever a tool honoured TMPDIR rather than
+        # RUNNER_TEMP: prost-build died with EACCES mid-`cargo clippy`, and
+        # a bare `mktemp` in a workflow failed the same way. reconcile.py
+        # already used the per-runner form, so the two paths disagreed and
+        # a reconcile silently "fixed" what setup had just written.
+        env_lines = [
+            *base_env_lines,
+            f"TMPDIR={rdir}/_tmp",
+            f"TMP={rdir}/_tmp",
+            f"TEMP={rdir}/_tmp",
+        ]
 
         # `setup` runs under sudo, so writing these directly would create
         # them root-owned inside a runner's home — the runner could then
