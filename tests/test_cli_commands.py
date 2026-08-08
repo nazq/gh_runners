@@ -236,6 +236,7 @@ class TestStartStop:
         self, fake_run: FakeRun, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(Path, "exists", lambda self: False)
+        monkeypatch.setattr(cli, "priv_exists_as", lambda u, p: False)
         result = runner.invoke(cli.app, ["start"])
         assert "not set up" in result.stdout
 
@@ -302,6 +303,7 @@ class TestLogs:
         self, fake_run: FakeRun, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(Path, "exists", lambda self: False)
+        monkeypatch.setattr(cli, "priv_exists_as", lambda u, p: False)
         result = runner.invoke(cli.app, ["logs", "TestOrg", "1"])
         assert result.exit_code != 0
         assert "No logs found" in result.stdout

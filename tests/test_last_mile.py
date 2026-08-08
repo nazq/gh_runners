@@ -81,6 +81,7 @@ class TestRestartSkipsUninstalled:
         monkeypatch.setattr(cli.time, "sleep", lambda s: None)
         monkeypatch.setattr(cli, "_wait_for_jobs", lambda cfg, org: True)
         monkeypatch.setattr(Path, "exists", lambda self: False)
+        monkeypatch.setattr(cli, "priv_exists_as", lambda u, p: False)
         result = runner.invoke(cli.app, ["restart"])
         assert result.exit_code == 0
         assert not fake_run.ran("gh-runner-test@")

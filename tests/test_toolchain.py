@@ -80,6 +80,10 @@ class TestPerRunnerEnv:
     ) -> str:
         from gh_runners import reconcile
 
+        # RUSTUP_HOME and the PATH entries are conditional on the toolchain
+        # actually containing them, so an empty tmp_path yields an env with
+        # neither. Create the rustup tree the assertions below expect.
+        (tmp_path / ".rustup").mkdir(parents=True, exist_ok=True)
         return reconcile.desired_env(org, 1, tmp_path)
 
     @pytest.mark.parametrize(
@@ -231,6 +235,48 @@ class TestWriteRunnerEnv:
         )
         tc.write_runner_env(legacy, tmp_path)
         assert (rdir / ".env").exists()
+
+    def test_setup_writes_exactly_what_reconcile_expects(
+        self,
+        org: Any,
+        tmp_path: Path,
+        fake_run: FakeRun,
+        fake_uid: None,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The file setup writes must equal the bytes reconcile compares to.
+
+        These were two independent derivations. With the live config they
+        differed on PATH (python/bin, cuda, the go tree), on DOCKER_HOST, on
+        whether RUSTUP_HOME was conditional, and on key order — and since
+        check_runner_env is a byte comparison, drift was guaranteed rather
+        than incidental. Every setup ended by declaring all 20 fresh files
+        drifted and rewriting them; setup-toolchain silently stripped
+        DOCKER_HOST and broke testcontainers on the next restart.
+
+        Assert the equality directly: it is the whole invariant, and nothing
+        else in the suite was checking it.
+        """
+        from gh_runners import reconcile
+
+        (tmp_path / ".rustup").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "go").mkdir(parents=True, exist_ok=True)
+
+        written: dict[Path, str] = {}
+        monkeypatch.setattr(
+            "gh_runners.privilege.write_as",
+            lambda u, path, content, **kw: written.__setitem__(path, content),
+        )
+        monkeypatch.setattr("gh_runners.privilege.exists_as", lambda u, p: True)
+
+        tc.write_runner_env(org, tmp_path)
+
+        for i in range(1, org.runner_count + 1):
+            env_path = org.runner_dir(i) / ".env"
+            assert env_path in written, f"runner-{i} .env never written"
+            assert written[env_path] == reconcile.desired_env(org, i, tmp_path), (
+                f"runner-{i}: setup and reconcile disagree about .env"
+            )
 
     def test_tmpdir_is_per_runner_not_the_operators(
         self, tmp_path: Path, fake_run: FakeRun, monkeypatch: pytest.MonkeyPatch
