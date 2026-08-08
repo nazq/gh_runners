@@ -31,6 +31,7 @@ from pathlib import Path
 
 from gh_runners import privilege as priv
 from gh_runners.config import Config, OrgConfig
+from gh_runners import toolchain
 from gh_runners.platform import run_cmd
 
 
@@ -112,33 +113,14 @@ def desired_env(org: OrgConfig, idx: int, tc_dir: Path) -> str:
     this and the file on disk is drift by definition, which is why the check
     is a byte comparison rather than a search for particular keys.
 
-    Writable per-runner, read-only shared. ``RUSTUP_HOME`` and the node tree
-    are only *read* during a build so they can live in the shared toolchain;
-    every tool that *writes* — cargo especially — needs its own directory, or
-    it either fails on a read-only path or races the other runners.
+    Thin alias for :func:`toolchain.runner_env`, which `setup` also writes.
+    It used to be a *second* derivation, and "single source of truth" was
+    therefore false in the one way that matters: the two disagreed, so every
+    setup produced 20 phantom drift findings and each side kept undoing the
+    other. Keep this a delegation — if it ever restates a key, the byte
+    comparison stops meaning what this docstring says it means.
     """
-    rdir = org.runner_dir(idx)
-    lines = [
-        f"PATH={tc_dir}/.cargo/bin:{tc_dir}/node/bin:"
-        "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-        f"RUSTUP_HOME={tc_dir}/.rustup",
-        f"CARGO_HOME={rdir}/.cargo",
-        f"NPM_CONFIG_CACHE={rdir}/.npm",
-        f"UV_CACHE_DIR={rdir}/.uv",
-        f"PIP_CACHE_DIR={rdir}/.pip",
-        f"PNPM_HOME={rdir}/.pnpm",
-        f"PNPM_STORE_DIR={rdir}/.pnpm",
-        f"GOMODCACHE={rdir}/.gomod",
-        f"TMPDIR={rdir}/_tmp",
-        f"TMP={rdir}/_tmp",
-        f"TEMP={rdir}/_tmp",
-        f"CLOUDSDK_CONFIG={rdir}/.gcloud",
-        f"DOCKER_CONFIG={rdir}/.docker",
-    ]
-    if org.isolated:
-        uid = priv._uid(org.runner_user)
-        lines.append(f"DOCKER_HOST=unix:///run/user/{uid}/podman/podman.sock")
-    return "\n".join(lines) + "\n"
+    return toolchain.runner_env(org, idx, tc_dir)
 
 
 _STATE_DIRS = (".cargo", ".npm", ".uv", ".pip", ".pnpm", ".gomod", "_tmp", ".docker")

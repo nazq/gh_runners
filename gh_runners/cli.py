@@ -255,6 +255,32 @@ def priv_exists_as(user: str, path: Path) -> bool:
     return exists_as(user, path)
 
 
+def runner_installed(org: OrgConfig, path: Path) -> bool:
+    """Is ``path`` present, asked as whoever can actually see it?
+
+    **Always use this instead of ``path.exists()`` for anything under a
+    runner directory.** For an isolated org the home is ``drwx------``, so
+    from the operator ``Path.exists()`` does not merely return False — it
+    raises ``PermissionError`` on the parent, and where it is caught it
+    answers False for all 20 runners.
+
+    Either way the answer is "not set up", which is how `stop` came to stop
+    nothing and print "Done.", `restart` came to wipe every `_work` while
+    the listeners were still running, and `remove` came to skip every
+    GitHub unregistration and then delete the accounts anyway — leaving 20
+    phantom registrations while reporting clean success. Failure reported
+    as success, on the commands an operator reaches for in an incident.
+
+    The tests hid it: the `installed` fixture forces ``Path.exists`` True.
+    """
+    # Windows has no sudo to impersonate through, and its runners are not
+    # isolated behind a drwx------ home, so the plain question is the right
+    # one there.
+    if org.isolated and org.runner_user and not is_windows():
+        return priv_exists_as(org.runner_user, path)
+    return path.exists()
+
+
 def priv_mkdir_as(user: str, path: Path) -> None:
     """Create a directory owned by ``user``, parents included."""
     from gh_runners.privilege import as_user
@@ -823,7 +849,7 @@ def start(org: Org = None) -> None:
         for i in range(1, o.runner_count + 1):
             name = o.runner_name(i)
             rdir = o.runner_dir(i)
-            if not rdir.exists():
+            if not runner_installed(o, rdir):
                 print(f"  {name}: not set up, skipping")
                 continue
             if is_windows():
@@ -848,7 +874,7 @@ def stop(org: Org = None) -> None:
         for i in range(1, o.runner_count + 1):
             name = o.runner_name(i)
             rdir = o.runner_dir(i)
-            if not rdir.exists():
+            if not runner_installed(o, rdir):
                 print(f"  {name}: not set up, skipping")
                 continue
             if is_windows():
@@ -885,7 +911,7 @@ def restart(
     for o in _select_orgs(cfg, org):
         for i in range(1, o.runner_count + 1):
             rdir = o.runner_dir(i)
-            if not rdir.exists():
+            if not runner_installed(o, rdir):
                 continue
             if is_windows():
                 win_stop_task(rdir)
@@ -899,7 +925,7 @@ def restart(
     for o in _select_orgs(cfg, org):
         for i in range(1, o.runner_count + 1):
             rdir = o.runner_dir(i)
-            if not rdir.exists():
+            if not runner_installed(o, rdir):
                 continue
             if is_windows():
                 win_start_task(rdir)
@@ -1095,7 +1121,7 @@ def remove(
             rdir = o.runner_dir(i)
             print(f"\n--- {name} ---")
 
-            if not rdir.exists():
+            if not runner_installed(o, rdir):
                 print("  Not set up, skipping.")
                 continue
 
@@ -1110,11 +1136,24 @@ def remove(
                 orphaned.append(name)
             else:
                 print("  Unregistering from GitHub...")
-                run_cmd(
-                    [config_script(rdir), "remove", "--token", org_token],
-                    cwd=rdir,
-                    check=False,
-                )
+                # As the runner, matching how `setup` registers it. Run as
+                # the operator this cannot even enter cwd=rdir; run as root
+                # GitHub's config.sh refuses outright ("Must not run with
+                # sudo") — and with the result discarded, either way the
+                # runner stayed registered while its home was deleted.
+                argv = [config_script(rdir), "remove", "--token", org_token]
+                if o.runner_user:
+                    from gh_runners.privilege import as_user
+
+                    rc = as_user(o.runner_user, argv, check=False, cwd=rdir).returncode
+                else:
+                    rc = run_cmd(argv, cwd=rdir, check=False).returncode
+                if rc != 0:
+                    # A failed deregistration is exactly what `orphaned`
+                    # exists to report; silence here is what leaves phantom
+                    # registrations behind after a "successful" teardown.
+                    print(f"  WARNING: unregister failed (exit {rc}).")
+                    orphaned.append(name)
 
             print(f"  Removing {rdir}...")
             if o.runner_user:
