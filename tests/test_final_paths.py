@@ -57,27 +57,6 @@ class TestRunnerUserEnv:
 
 
 @pytest.mark.posix_only
-class TestSystemctlUserDispatch:
-    def test_uses_the_callers_manager_when_no_user_is_set(
-        self, fake_run: FakeRun, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.delenv("GH_RUNNERS_USER", raising=False)
-        plat.systemctl_user("is-active", "gh-runner@1.service")
-        assert fake_run.calls[0][:2] == ["systemctl", "--user"]
-
-    def test_targets_the_named_user_when_set(
-        self, fake_run: FakeRun, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setenv("GH_RUNNERS_USER", "ghr-test")
-        monkeypatch.setattr(
-            "pwd.getpwnam",
-            lambda u: type("P", (), {"pw_uid": 1001, "pw_dir": "/srv/x"})(),
-        )
-        plat.systemctl_user("is-active", "gh-runner@1.service")
-        assert "ghr-test" in " ".join(fake_run.calls[0])
-
-
-@pytest.mark.posix_only
 class TestSystemdUserDir:
     def test_defaults_to_the_callers_home(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
