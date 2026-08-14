@@ -132,6 +132,10 @@ All commands support `--org <name>` to target a specific organization.
 | `gh-runners slice show` | Show cgroup CPU/memory weights on the runner user slices (Linux) |
 | `gh-runners slice apply` | Apply `[slices]` weights and the build-lock tmpfiles entry (Linux) |
 | `gh-runners slice apply --print-only` | Print the commands for the operator instead of running them |
+| `gh-runners fpq run --class C -- cmd…` | Queue a build-class job, stream it, exit with its real code (Linux) |
+| `gh-runners fpq status` | Show every class queue: running/queued jobs, ages, exit codes |
+| `gh-runners fpq bump <class> <id>` | Move a queued job to the front of its class |
+| `gh-runners clone-target <src> <dst>` | Hardlink a worktree's immutable cargo dep artifacts into a fresh one (Linux) |
 
 `setup` and `remove` accept an optional `--token TOKEN`. If omitted, a registration token is fetched automatically via the `gh` CLI.
 

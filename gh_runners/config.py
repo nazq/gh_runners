@@ -73,6 +73,25 @@ class SliceConfig:
     lock_owner: str = ""
 
 
+# One task-spooler daemon per class; the slot count caps how many jobs of
+# that class run at once. Image builds get one slot because container builds
+# duplicate the whole compile inside a namespace where the shared jobserver
+# is unreachable — two at once means two ungoverned full builds.
+DEFAULT_FPQ_SLOTS = {"compile": 2, "itest": 2, "image": 1}
+
+
+@dataclass
+class FpqConfig:
+    """Per-class admission slots for the fpq build queue.
+
+    Keys are job classes, values the number of jobs of that class allowed
+    to run concurrently. Classes here are also what ``fpq run --class``
+    accepts, so adding a class is a config edit, not a code change.
+    """
+
+    slots: dict[str, int] = field(default_factory=lambda: dict(DEFAULT_FPQ_SLOTS))
+
+
 @dataclass
 class Config:
     """Top-level configuration."""
@@ -88,6 +107,7 @@ class Config:
     runner_home_real: str = ""
     toolchain: ToolchainConfig = field(default_factory=ToolchainConfig)
     slices: SliceConfig = field(default_factory=SliceConfig)
+    fpq: FpqConfig = field(default_factory=FpqConfig)
     orgs: list[OrgConfig] = field(default_factory=list)
 
 
@@ -163,6 +183,13 @@ def load_config(config_path: Path | None = None) -> Config:
         lock_owner=str(sl_raw.get("lock_owner", "")),
     )
 
+    # [fpq] overlays the defaults rather than replacing them, so a config
+    # that only tunes one class keeps the shipped slots for the others.
+    fpq_slots = dict(DEFAULT_FPQ_SLOTS)
+    for key, val in raw.get("fpq", {}).items():
+        fpq_slots[str(key)] = int(val)
+    fpq = FpqConfig(slots=fpq_slots)
+
     return Config(
         runner_version=runner_ver.get("version", "2.322.0"),
         job_wait_seconds=timeouts.get("job_wait_seconds", 3600),
@@ -170,5 +197,6 @@ def load_config(config_path: Path | None = None) -> Config:
         runner_home_real=paths.get("runner_home_real", ""),
         toolchain=toolchain,
         slices=slices,
+        fpq=fpq,
         orgs=orgs,
     )
