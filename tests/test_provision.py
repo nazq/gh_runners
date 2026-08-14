@@ -62,8 +62,14 @@ class TestEnsureBindMount:
     """
 
     def test_mounts_when_not_already_mounted(
-        self, fake_run: FakeRun, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+        self,
+        fake_run: FakeRun,
+        fake_subprocess_run: list[dict[str, Any]],
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
     ) -> None:
+        """An empty fstab means the entry gets appended — through the
+        captured tee seam, never a real `sudo tee -a /etc/fstab`."""
         monkeypatch.setattr(Path, "is_dir", lambda self: True)
         monkeypatch.setattr(Path, "read_text", lambda self: "")
         fake_run.when("mountpoint", returncode=1)
@@ -72,6 +78,9 @@ class TestEnsureBindMount:
         )
         assert changed is True
         assert fake_run.ran("mount --bind /mnt/real /srv/gh-runners")
+        tees = [c for c in fake_subprocess_run if "tee" in c["args"]]
+        assert len(tees) == 1
+        assert tees[0]["input"] == "/mnt/real  /srv/gh-runners  none  bind  0 0\n"
 
     def test_skips_mounting_when_already_mounted(
         self, fake_run: FakeRun, monkeypatch: pytest.MonkeyPatch

@@ -97,6 +97,26 @@ crates = "cargo-llvm-cov just tauri-cli"
 # version = "3.13"
 # extra_versions = ["3.11", "3.12", "3.14"]
 
+# ── Linux-only: CI cgroup weighting ─────────────────────────────
+# Runner jobs execute under each runner user's session slice
+# (user-<uid>.slice), so these properties govern all CI as a class.
+# Applied with `gh-runners slice apply`; inspect with `gh-runners slice show`.
+#
+# cpu_weight is work-conserving: CI keeps the whole machine when it is
+# otherwise idle and yields to interactive builds only under contention
+# (systemd's default weight is 100, so 30 ≈ a 3:10 share when contended).
+# memory_high is a soft ceiling — past it the kernel throttles the slice
+# into reclaim rather than OOM-killing anything.
+#
+# lock_owner names the account owning /tmp/host-build.lock, the flock(1)
+# file used for cross-user build arbitration. Defaults to the invoking
+# operator. The lock is created 0666 on purpose: flock opens it with
+# write intent, so anything stricter breaks every other user's builds.
+# [slices]
+# cpu_weight = 30
+# memory_high = "32G"
+# lock_owner = "you"
+
 # ── Organizations ────────────────────────────────────────────────
 # Define one [[org]] block per GitHub organization.
 

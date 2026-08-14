@@ -57,6 +57,23 @@ class ToolchainConfig:
 
 
 @dataclass
+class SliceConfig:
+    """cgroup weighting for the runner users' session slices.
+
+    ``cpu_weight`` is relative and work-conserving (default systemd weight
+    is 100, so 30 means CI yields roughly 3:10 under contention and keeps
+    the whole machine when idle). ``memory_high`` is a soft ceiling: the
+    kernel throttles the slice into reclaim past it rather than OOM-killing.
+    ``lock_owner`` names the account that owns the shared build-lock file;
+    empty means the invoking operator.
+    """
+
+    cpu_weight: int = 30
+    memory_high: str = "32G"
+    lock_owner: str = ""
+
+
+@dataclass
 class Config:
     """Top-level configuration."""
 
@@ -70,6 +87,7 @@ class Config:
     # homes are created directly under /srv/gh-runners.
     runner_home_real: str = ""
     toolchain: ToolchainConfig = field(default_factory=ToolchainConfig)
+    slices: SliceConfig = field(default_factory=SliceConfig)
     orgs: list[OrgConfig] = field(default_factory=list)
 
 
@@ -138,11 +156,19 @@ def load_config(config_path: Path | None = None) -> Config:
     runner_ver = raw.get("runner_version", {})
     paths = raw.get("paths", {})
 
+    sl_raw = raw.get("slices", {})
+    slices = SliceConfig(
+        cpu_weight=int(sl_raw.get("cpu_weight", SliceConfig.cpu_weight)),
+        memory_high=str(sl_raw.get("memory_high", SliceConfig.memory_high)),
+        lock_owner=str(sl_raw.get("lock_owner", "")),
+    )
+
     return Config(
         runner_version=runner_ver.get("version", "2.322.0"),
         job_wait_seconds=timeouts.get("job_wait_seconds", 3600),
         poll_interval=timeouts.get("poll_interval", 10),
         runner_home_real=paths.get("runner_home_real", ""),
         toolchain=toolchain,
+        slices=slices,
         orgs=orgs,
     )
