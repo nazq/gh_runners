@@ -18,7 +18,7 @@ import typer
 
 from gh_runners import escalation as esc
 from gh_runners.check_host import cmd_check_host
-from gh_runners.config import Config, OrgConfig, load_config
+from gh_runners.config import Config, OrgConfig, SliceConfig, load_config
 from gh_runners.reconcile import gh_org_from_url, github_runner_state
 from gh_runners.platform import (
     config_script,
@@ -47,6 +47,12 @@ app = typer.Typer(
     add_completion=False,
     no_args_is_help=True,
 )
+
+slice_app = typer.Typer(
+    help="Weight runner CI via cgroup v2 on the ghr-* user slices.",
+    no_args_is_help=True,
+)
+app.add_typer(slice_app, name="slice")
 
 # Common option types
 Org = Annotated[Optional[str], typer.Option("--org", help="Target a specific org.")]
@@ -1241,6 +1247,166 @@ def logs(
 
     print(f"\n--- End of {latest.name} ({len(lines)} total lines) ---")
     print(f"Full log: {latest}")
+
+
+# ---------------------------------------------------------------------------
+# slice — weighting CI as a class via the runner users' cgroup slices
+# ---------------------------------------------------------------------------
+
+
+def _require_linux(what: str) -> None:
+    """cgroup v2 and systemd slices exist only on Linux."""
+    if not is_linux():
+        print(f"ERROR: {what} manages cgroup v2 slices and is Linux-only.")
+        raise typer.Exit(1)
+
+
+@slice_app.command("show")
+def slice_show() -> None:
+    """Show CPU/memory weights on each runner user's slice."""
+    from gh_runners import slices as sl
+
+    _require_linux("slice show")
+    users = sl.runner_users()
+    if not users:
+        print("No runner users (ghr*) found in the passwd database.")
+        return
+
+    # Two views on purpose: the runtime columns are what the kernel is
+    # enforcing right now, the persistent ones are what systemd will apply
+    # whenever the slice next exists. Disagreement between them is the
+    # interesting finding — a weight applied non-persistently, or one
+    # persisted while the user was logged out.
+    print(f"\n{'runtime (cgroup)':>44}  {'persistent (systemd)':>25}")
+    print(
+        f"{'User':<12} {'Slice':<18} "
+        f"{'cpu.weight':<12} {'memory.high':<14} "
+        f"{'CPUWeight':<12} {'MemoryHigh'}"
+    )
+    print("-" * 84)
+    for u in users:
+        runtime = sl.read_runtime(u)
+        if runtime is None:
+            # Not an error: no session and no linger means no slice, and
+            # the persistent settings still land when it next appears.
+            cpu, mem = "slice not active", ""
+        else:
+            cpu, mem = runtime
+        persist = sl.read_persistent(u)
+        p_cpu = persist.get("CPUWeight", "?")
+        p_mem = persist.get("MemoryHigh", "?")
+        print(
+            f"{u.name:<12} {u.slice_unit:<18} {cpu:<12} {mem:<14} {p_cpu:<12} {p_mem}"
+        )
+
+
+@slice_app.command("apply")
+def slice_apply(
+    print_only: Annotated[
+        bool,
+        typer.Option(
+            "--print-only",
+            help="Print the commands instead of running them.",
+        ),
+    ] = False,
+) -> None:
+    """Apply the configured weights to every runner user's slice.
+
+    Also installs the tmpfiles.d entry for the cross-user build lock.
+    Idempotent: slices already at the target values are reported and left
+    alone. Without root or passwordless sudo the exact commands are
+    printed for the operator instead — never a password prompt, so this
+    is safe to run from automation.
+    """
+    from gh_runners import slices as sl
+    from gh_runners.privilege import as_root
+
+    _require_linux("slice apply")
+    cfg = load_config()
+    sc = cfg.slices
+    users = sl.runner_users()
+    if not users:
+        print("No runner users (ghr*) found in the passwd database.")
+        return
+
+    # have_root_now is deliberately one-directional (a per-command NOPASSWD
+    # rule can read as False), but the fallback here is printing commands —
+    # safe rather than wrong. Unlike setup/remove this never prompts: the
+    # weights are tuning, not provisioning, and blocking automation on a
+    # password for tuning is the wrong trade.
+    can_run = not print_only and (esc.is_root() or esc.have_root_now())
+    if not can_run:
+        if not print_only:
+            print("Not root and no passwordless sudo — printing commands instead.")
+        print("Run as root:\n")
+
+    failed: list[str] = []
+    for u in users:
+        if sl.matches_desired(sl.read_persistent(u), sc):
+            print(f"  {u.name} ({u.slice_unit}): unchanged")
+            continue
+        argv = sl.set_property_argv(u, sc)
+        if not can_run:
+            print(f"  {' '.join(argv)}")
+            continue
+        result = as_root(argv, check=False)
+        if result.returncode == 0:
+            print(
+                f"  {u.name} ({u.slice_unit}): changed -> "
+                f"CPUWeight={sc.cpu_weight} MemoryHigh={sc.memory_high}"
+            )
+        else:
+            print(f"  {u.name} ({u.slice_unit}): FAILED (exit {result.returncode})")
+            failed.append(u.name)
+
+    _apply_build_lock_conf(sc, can_run=can_run)
+
+    if failed:
+        raise typer.Exit(1)
+
+
+def _apply_build_lock_conf(sc: SliceConfig, *, can_run: bool) -> None:
+    """Install (or print) the build-lock tmpfiles.d entry, idempotently."""
+    from gh_runners import slices as sl
+    from gh_runners.privilege import as_root
+
+    owner = sc.lock_owner or sl.default_lock_owner()
+    content = sl.tmpfiles_content(owner)
+
+    try:
+        existing = sl.TMPFILES_PATH.read_text()
+    except OSError:
+        existing = None
+    if existing == content:
+        print(f"  {sl.TMPFILES_PATH}: unchanged")
+        return
+
+    if not can_run:
+        # A paste-able heredoc, not a description of one: the operator
+        # should be one clipboard away from done.
+        print(f"\n  sudo tee {sl.TMPFILES_PATH} <<'EOF'\n{content}EOF")
+        print(f"  sudo systemd-tmpfiles --create {sl.TMPFILES_PATH}")
+        return
+
+    # Written via a staged copy: as_root cannot pipe stdin, and the target
+    # directory is root-owned so the operator cannot write there directly.
+    with tempfile.NamedTemporaryFile("w", suffix=".conf", delete=False) as tf:
+        tf.write(content)
+        staged = Path(tf.name)
+    try:
+        result = as_root(
+            ["install", "-m", "0644", str(staged), str(sl.TMPFILES_PATH)],
+            check=False,
+        )
+    finally:
+        staged.unlink(missing_ok=True)
+    if result.returncode != 0:
+        print(f"  {sl.TMPFILES_PATH}: FAILED (exit {result.returncode})")
+        raise typer.Exit(1)
+    # Without this the lock file would only appear at next boot; --create
+    # applies the entry now, and the aging exemption with it.
+    as_root(["systemd-tmpfiles", "--create", str(sl.TMPFILES_PATH)], check=False)
+    print(f"  {sl.TMPFILES_PATH}: written (owner {owner}), lock created")
 
 
 def main() -> None:

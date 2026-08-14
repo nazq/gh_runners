@@ -129,6 +129,9 @@ All commands support `--org <name>` to target a specific organization.
 | `gh-runners clean` | Clean `_work` directories (stop runners first) |
 | `gh-runners logs <org> <N>` | Show last 50 log lines for runner N |
 | `gh-runners remove` | Unregister from GitHub, remove services |
+| `gh-runners slice show` | Show cgroup CPU/memory weights on the runner user slices (Linux) |
+| `gh-runners slice apply` | Apply `[slices]` weights and the build-lock tmpfiles entry (Linux) |
+| `gh-runners slice apply --print-only` | Print the commands for the operator instead of running them |
 
 `setup` and `remove` accept an optional `--token TOKEN`. If omitted, a registration token is fetched automatically via the `gh` CLI.
 
