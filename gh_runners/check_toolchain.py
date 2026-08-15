@@ -80,7 +80,7 @@ def _check_rust(tc_dir: Path) -> tuple[int, int, bool]:
         passed += _ok("rustup binary", str(rustup_bin))
     else:
         failed += not _fail("rustup binary", str(rustup_bin))
-        return passed, failed + 1, False
+        return passed, failed, False
 
     result = run_cmd([str(rustup_bin), "--version"], capture=True, check=False, env=env)
     if result.returncode == 0:
@@ -104,7 +104,7 @@ def _check_rust(tc_dir: Path) -> tuple[int, int, bool]:
     else:
         failed += not _fail("stable toolchain installed")
         needs_fix = True
-        return passed, failed + 1, needs_fix
+        return passed, failed, needs_fix
 
     stable_bin = _find_stable_bin(rh)
     if stable_bin is None:

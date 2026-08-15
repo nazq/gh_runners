@@ -290,18 +290,12 @@ class TestCheckRust:
 class TestFailureCounting:
     """The summary line must match the findings that were printed.
 
-    Both early returns in `_check_rust` count their failure twice: they do
-    `failed += not _fail(...)`, which is already +1, and then return
-    ``failed + 1``. The summary therefore reports two failures where exactly
-    one FAIL line was printed. These are xfail so they flip to passing when
-    the off-by-one is removed; nothing else in the suite depends on the
-    inflated number.
+    Both early returns in `_check_rust` once counted their failure twice —
+    `failed += not _fail(...)` already increments, and the return added one
+    more — so the summary reported two failures for a single printed FAIL
+    line. These pin the corrected arithmetic.
     """
 
-    @pytest.mark.xfail(
-        reason="early return adds 1 to an already-incremented counter",
-        strict=True,
-    )
     def test_a_missing_rustup_is_counted_once(
         self, tc_dir: Path, fake_run: FakeRun, capsys: pytest.CaptureFixture[str]
     ) -> None:
@@ -310,10 +304,6 @@ class TestFailureCounting:
         assert printed == 1
         assert failed == printed
 
-    @pytest.mark.xfail(
-        reason="early return adds 1 to an already-incremented counter",
-        strict=True,
-    )
     def test_a_missing_stable_toolchain_is_counted_once(
         self, with_rustup: Path, fake_run: FakeRun, capsys: pytest.CaptureFixture[str]
     ) -> None:
