@@ -31,6 +31,7 @@ from pathlib import Path
 
 from gh_runners import privilege as priv
 from gh_runners.config import Config, OrgConfig
+from gh_runners import toolchain
 from gh_runners.platform import run_cmd
 
 
@@ -112,33 +113,14 @@ def desired_env(org: OrgConfig, idx: int, tc_dir: Path) -> str:
     this and the file on disk is drift by definition, which is why the check
     is a byte comparison rather than a search for particular keys.
 
-    Writable per-runner, read-only shared. ``RUSTUP_HOME`` and the node tree
-    are only *read* during a build so they can live in the shared toolchain;
-    every tool that *writes* — cargo especially — needs its own directory, or
-    it either fails on a read-only path or races the other runners.
+    Thin alias for :func:`toolchain.runner_env`, which `setup` also writes.
+    It used to be a *second* derivation, and "single source of truth" was
+    therefore false in the one way that matters: the two disagreed, so every
+    setup produced 20 phantom drift findings and each side kept undoing the
+    other. Keep this a delegation — if it ever restates a key, the byte
+    comparison stops meaning what this docstring says it means.
     """
-    rdir = org.runner_dir(idx)
-    lines = [
-        f"PATH={tc_dir}/.cargo/bin:{tc_dir}/node/bin:"
-        "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-        f"RUSTUP_HOME={tc_dir}/.rustup",
-        f"CARGO_HOME={rdir}/.cargo",
-        f"NPM_CONFIG_CACHE={rdir}/.npm",
-        f"UV_CACHE_DIR={rdir}/.uv",
-        f"PIP_CACHE_DIR={rdir}/.pip",
-        f"PNPM_HOME={rdir}/.pnpm",
-        f"PNPM_STORE_DIR={rdir}/.pnpm",
-        f"GOMODCACHE={rdir}/.gomod",
-        f"TMPDIR={rdir}/_tmp",
-        f"TMP={rdir}/_tmp",
-        f"TEMP={rdir}/_tmp",
-        f"CLOUDSDK_CONFIG={rdir}/.gcloud",
-        f"DOCKER_CONFIG={rdir}/.docker",
-    ]
-    if org.isolated:
-        uid = priv._uid(org.runner_user)
-        lines.append(f"DOCKER_HOST=unix:///run/user/{uid}/podman/podman.sock")
-    return "\n".join(lines) + "\n"
+    return toolchain.runner_env(org, idx, tc_dir)
 
 
 _STATE_DIRS = (".cargo", ".npm", ".uv", ".pip", ".pnpm", ".gomod", "_tmp", ".docker")
@@ -618,7 +600,9 @@ def apply(report: Report, cfg: Config | None = None) -> tuple[int, int]:
     not actually have. Pass ``cfg`` to restart the affected services.
     """
     repaired = skipped = 0
-    touched_env: set[str] = set()
+    # (org name, runner index) — the specific units whose .env changed, so
+    # only those get restarted.
+    touched_env: set[tuple[str, int]] = set()
 
     for f in report.drift:
         if f.repair is None:
@@ -637,15 +621,57 @@ def apply(report: Report, cfg: Config | None = None) -> tuple[int, int]:
             continue
         repaired += 1
         if ".env" in f.name:
-            touched_env.add(f.name.split("/")[0])
+            # "<org>/runner-<i>: .env" — restart only this unit, not the
+            # whole org. Restarting all of them meant one drifted runner
+            # killed every in-flight job in its org.
+            org_name, _, rest = f.name.partition("/")
+            num = rest.split(":")[0].removeprefix("runner-")
+            if num.isdigit():
+                touched_env.add((org_name, int(num)))
 
     if cfg is not None and touched_env:
         for org in cfg.orgs:
-            if org.name not in touched_env or not org.isolated:
+            if not org.isolated:
                 continue
-            for i in range(1, org.runner_count + 1):
-                priv.systemctl_user(
-                    org.runner_user, "restart", f"{org.service_prefix}@{i}.service"
-                )
+            for _, idx in sorted(t for t in touched_env if t[0] == org.name):
+                unit = f"{org.service_prefix}@{idx}.service"
+                # A restart mid-job kills the job, and this module's own
+                # rule is "repair never destroys work" — a running CI job is
+                # exactly that. `restart` (the command) waits for jobs;
+                # apply used to just fire, so a re-run of setup killed every
+                # in-flight job on the fleet. Skip and report instead: the
+                # .env on disk is already correct, it just is not loaded
+                # yet, so deferring costs nothing.
+                if _runner_is_busy(org, idx):
+                    print(
+                        f"  {org.name}/runner-{idx}: busy, not restarting (.env "
+                        "applies when it next idles)"
+                    )
+                    continue
+                priv.systemctl_user(org.runner_user, "restart", unit)
 
     return repaired, skipped
+
+
+def _runner_is_busy(org: OrgConfig, idx: int) -> bool:
+    """True if this runner is executing a job right now.
+
+    A listener always runs; a *job* means a Runner.Worker child. Absence of
+    evidence is treated as busy — if the probe cannot answer, the safe
+    reading is "might be working", because the cost of being wrong is a
+    killed CI job versus a deferred config reload.
+    """
+    if not org.runner_user:
+        return False
+    rdir = org.runner_dir(idx)
+    r = priv.as_user(
+        org.runner_user,
+        ["pgrep", "-f", f"Runner.Worker.*{rdir}"],
+        check=False,
+        capture=True,
+    )
+    if r.returncode == 0 and r.stdout.strip():
+        return True
+    # pgrep exits 1 for "no match" and >1 for its own failures; only 1 is a
+    # trustworthy "not busy".
+    return r.returncode not in (0, 1)

@@ -10,6 +10,7 @@ from __future__ import annotations
 import tarfile
 import zipfile
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -42,8 +43,21 @@ class _NullTar:
 
 @pytest.fixture
 def no_extract(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Downloads are faked, so there is no archive on disk to open."""
-    monkeypatch.setattr(tarfile, "open", lambda *a, **k: _NullTar())
+    """Downloads are faked, so there is no archive on disk to open.
+
+    The stub still has to *populate* the destination: installs now stage a
+    new tree and swap it in only on success, so an extraction that yields
+    nothing is indistinguishable from the corrupt download that behaviour
+    exists to survive.
+    """
+
+    class _StubTar(_NullTar):
+        def extractall(self, dest: Any = None, **kw: Any) -> None:
+            if dest is not None:
+                # go's tarball wraps everything in a single `go/` directory.
+                (Path(dest) / "go" / "bin").mkdir(parents=True, exist_ok=True)
+
+    monkeypatch.setattr(tarfile, "open", lambda *a, **k: _StubTar())
     monkeypatch.setattr(zipfile, "ZipFile", lambda *a, **k: _NullTar())
 
 
@@ -254,3 +268,96 @@ class TestInstallPackage:
         pkgs.install_package(pkg, tmp_path, "arm")
         assert called == []
         assert "build it yourself" in capsys.readouterr().out
+
+
+class TestSafeFetchAndReplace:
+    """A failed download must never cost you the working install.
+
+    All three of go, bun and pwsh ran curl without --fail and then
+    rmtree'd the existing tree before extracting. curl writes the server's
+    error body and exits 0 on a 404, so a typo'd version deleted a working
+    toolchain and left the host with nothing until someone re-ran with a
+    correct one — the fnm bug's mechanism, three more times.
+    """
+
+    def test_fetch_verified_uses_fail_and_reports(
+        self, fake_run: FakeRun, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        fake_run.when("curl", returncode=22)
+        dest = tmp_path / "x.tgz"
+        dest.write_text("stale")
+        assert pkgs.fetch_verified("https://e/x.tgz", dest, "go") is False
+        assert "--fail" in " ".join(fake_run.calls[0])
+        # The half-written file must not survive to be extracted later.
+        assert not dest.exists()
+        assert "FAILED to download" in capsys.readouterr().out
+
+    def test_a_failed_build_leaves_the_previous_install(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        target = tmp_path / "go"
+        (target / "bin").mkdir(parents=True)
+        (target / "bin" / "go").write_text("#!/bin/sh\n")
+
+        def explode(staging: Path) -> None:
+            raise RuntimeError("corrupt archive")
+
+        with pytest.raises(RuntimeError, match="corrupt archive"):
+            pkgs._replace_tree(target, explode, "go")
+
+        assert (target / "bin" / "go").read_text() == "#!/bin/sh\n"
+        assert "previous version left in place" in capsys.readouterr().out
+
+    def test_a_successful_build_replaces_the_tree(self, tmp_path: Path) -> None:
+        target = tmp_path / "go"
+        (target / "bin").mkdir(parents=True)
+        (target / "bin" / "old").write_text("old")
+
+        def build(staging: Path) -> None:
+            (staging / "bin").mkdir(parents=True)
+            (staging / "bin" / "new").write_text("new")
+
+        pkgs._replace_tree(target, build, "go")
+        assert (target / "bin" / "new").exists()
+        assert not (target / "bin" / "old").exists()
+
+    def test_unwrap_requires_exactly_one_directory(self, tmp_path: Path) -> None:
+        """unwrap is passed explicitly, so a mismatch is a real error rather
+        than a silent relocation of the whole install."""
+        target = tmp_path / "go"
+
+        def build(staging: Path) -> None:
+            (staging / "a").mkdir()
+            (staging / "b").mkdir()
+
+        with pytest.raises(RuntimeError, match="expected one top-level directory"):
+            pkgs._replace_tree(target, build, "go", unwrap=True)
+
+    @pytest.mark.parametrize(
+        ("installer", "home", "arch"),
+        [
+            (pkgs._install_go, pkgs.go_home, "x64"),
+            (pkgs._install_bun, pkgs.bun_home, "x64"),
+            (pkgs._install_pwsh, lambda d: d / "pwsh", "x64"),
+        ],
+    )
+    def test_a_failed_download_leaves_the_install_untouched(
+        self,
+        fake_run: FakeRun,
+        tmp_path: Path,
+        installer: Any,
+        home: Any,
+        arch: str,
+    ) -> None:
+        """The whole point of the change: a 404 must not cost you the
+        working toolchain. Previously curl exited 0 on an error page and
+        the tree was already rmtree'd by the time extraction failed."""
+        existing = home(tmp_path)
+        (existing / "bin").mkdir(parents=True)
+        marker = existing / "bin" / "keep-me"
+        marker.write_text("still here")
+        fake_run.when("curl", returncode=22)
+
+        installer(tmp_path, arch, {"version": "9.9.9"})
+
+        assert marker.read_text() == "still here"

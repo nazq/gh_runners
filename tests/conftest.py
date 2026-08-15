@@ -113,6 +113,7 @@ def fake_run(monkeypatch: pytest.MonkeyPatch) -> FakeRun:
         "gh_runners.provision",
         "gh_runners.reconcile",
         "gh_runners.escalation",
+        "gh_runners.slices",
     ):
         monkeypatch.setattr(f"{mod}.run_cmd", fake, raising=False)
     return fake
@@ -120,11 +121,11 @@ def fake_run(monkeypatch: pytest.MonkeyPatch) -> FakeRun:
 
 @pytest.fixture
 def fake_subprocess_run(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
-    """Capture the one call that legitimately bypasses run_cmd.
+    """Capture the calls that legitimately bypass run_cmd.
 
-    `write_as` pipes content to `tee` over stdin, which run_cmd does not
-    express. It is the only such call; the autouse backstop below would
-    otherwise reject it.
+    `write_as` and the fstab append both pipe content to `tee` over stdin,
+    which run_cmd does not express. The autouse backstop below would
+    otherwise reject them.
     """
     calls: list[dict[str, Any]] = []
 
@@ -134,7 +135,8 @@ def fake_subprocess_run(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]
             args=args, returncode=0, stdout="", stderr=""
         )
 
-    monkeypatch.setattr("gh_runners.privilege.subprocess.run", _record)
+    for mod in ("gh_runners.privilege", "gh_runners.provision"):
+        monkeypatch.setattr(f"{mod}.subprocess.run", _record)
     return calls
 
 
@@ -169,8 +171,31 @@ def _no_real_subprocess(monkeypatch: pytest.MonkeyPatch) -> None:
         PIPE = subprocess.PIPE
         CompletedProcess = subprocess.CompletedProcess
 
-    for mod in ("gh_runners.platform", "gh_runners.privilege"):
+    for mod in ("gh_runners.platform", "gh_runners.privilege", "gh_runners.provision"):
         monkeypatch.setattr(f"{mod}.subprocess", _Guard, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _isolated_fstab(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Point `/etc/fstab` at an empty file no test shares with the host.
+
+    `ensure_bind_mount` branches on whether the entry is already present, so
+    reading the real fstab made that branch depend on whether this tool had
+    ever been run for real on the machine. Where the entry existed the
+    append was skipped and the `setup` tests sailed past it; on a clean host
+    the same tests reached the append, tripped the `_no_real_subprocess`
+    backstop, and `setup` aborted before configuring a single runner —
+    visible only as an empty command list.
+
+    Pinned here rather than per-test for the same reason as `is_linux`: a
+    host-dependent branch is not something each test should have to
+    remember to neutralise.
+    """
+    from gh_runners import provision
+
+    fstab = tmp_path / "fstab"
+    fstab.write_text("")
+    monkeypatch.setattr(provision, "FSTAB", fstab)
 
 
 @pytest.fixture(autouse=True)

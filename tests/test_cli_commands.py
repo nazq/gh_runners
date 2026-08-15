@@ -163,6 +163,38 @@ class TestRemove:
         assert unreg is not None and delete is not None
         assert unreg < delete
 
+    def test_unregisters_as_the_runner_not_the_operator(
+        self, fake_run: FakeRun, installed: None, fake_uid: None
+    ) -> None:
+        """The old test asserted only the ORDER of unregister vs delete.
+
+        Run as the operator, config.sh cannot even enter cwd=rdir; run as
+        root, GitHub's script refuses outright ("Must not run with sudo").
+        Either way the result was discarded, so the runner stayed
+        registered while its home was deleted.
+        """
+        runner.invoke(cli.app, ["remove"])
+        unreg = [ln for ln in fake_run.command_lines if "config.sh remove" in ln]
+        assert unreg, "no unregister issued"
+        assert all("-u ghr-test" in ln for ln in unreg)
+
+    def test_a_failed_unregister_is_reported_as_orphaned(
+        self,
+        fake_run: FakeRun,
+        installed: None,
+        fake_uid: None,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Silence here is what leaves phantom registrations behind after a
+        teardown that reported clean success."""
+        fake_run.when("config.sh remove", returncode=1)
+        result = runner.invoke(cli.app, ["remove"])
+        assert "unregister failed" in result.stdout
+        # The loud end-of-run warning must name them, or the operator has
+        # no way to know which registrations to reap by hand.
+        assert "were not deregistered" in result.stdout
+        assert "ghr-test-1" in result.stdout
+
     def test_keeps_accounts_without_purge(
         self, fake_run: FakeRun, installed: None, fake_uid: None
     ) -> None:
@@ -236,6 +268,7 @@ class TestStartStop:
         self, fake_run: FakeRun, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(Path, "exists", lambda self: False)
+        monkeypatch.setattr(cli, "priv_exists_as", lambda u, p: False)
         result = runner.invoke(cli.app, ["start"])
         assert "not set up" in result.stdout
 
@@ -302,6 +335,7 @@ class TestLogs:
         self, fake_run: FakeRun, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(Path, "exists", lambda self: False)
+        monkeypatch.setattr(cli, "priv_exists_as", lambda u, p: False)
         result = runner.invoke(cli.app, ["logs", "TestOrg", "1"])
         assert result.exit_code != 0
         assert "No logs found" in result.stdout

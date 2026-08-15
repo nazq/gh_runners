@@ -192,6 +192,7 @@ class TestStatusNotSetUp:
         fine, which is how ten running runners came to read "not set up".
         """
         monkeypatch.setattr(Path, "exists", lambda self: False)
+        monkeypatch.setattr(cli, "priv_exists_as", lambda u, p: False)
         fake_run.when("test -e", returncode=1)
         result = runner.invoke(cli.app, ["status"])
         assert "not set up" in result.stdout

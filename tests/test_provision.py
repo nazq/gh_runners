@@ -8,6 +8,7 @@ home directory.
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -61,8 +62,14 @@ class TestEnsureBindMount:
     """
 
     def test_mounts_when_not_already_mounted(
-        self, fake_run: FakeRun, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+        self,
+        fake_run: FakeRun,
+        fake_subprocess_run: list[dict[str, Any]],
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
     ) -> None:
+        """An empty fstab means the entry gets appended — through the
+        captured tee seam, never a real `sudo tee -a /etc/fstab`."""
         monkeypatch.setattr(Path, "is_dir", lambda self: True)
         monkeypatch.setattr(Path, "read_text", lambda self: "")
         fake_run.when("mountpoint", returncode=1)
@@ -71,6 +78,9 @@ class TestEnsureBindMount:
         )
         assert changed is True
         assert fake_run.ran("mount --bind /mnt/real /srv/gh-runners")
+        tees = [c for c in fake_subprocess_run if "tee" in c["args"]]
+        assert len(tees) == 1
+        assert tees[0]["input"] == "/mnt/real  /srv/gh-runners  none  bind  0 0\n"
 
     def test_skips_mounting_when_already_mounted(
         self, fake_run: FakeRun, monkeypatch: pytest.MonkeyPatch
@@ -91,11 +101,71 @@ class TestEnsureBindMount:
     def test_persists_to_fstab_so_it_survives_reboot(
         self, fake_run: FakeRun, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """Assert the BYTES, not that some command mentioned /etc/fstab.
+
+        The old assertion passed while the code appended a Python repr —
+        a literal backslash-n in the fs_passno field and no terminating
+        newline, so the next append would concatenate onto the same line
+        and produce an entry that can drop the boot to emergency mode.
+        """
         monkeypatch.setattr(Path, "is_dir", lambda self: True)
         monkeypatch.setattr(Path, "read_text", lambda self: "")
         fake_run.when("mountpoint", returncode=0)
+
+        captured: dict[str, object] = {}
+
+        def fake_tee(argv: list[str], **kw: object) -> subprocess.CompletedProcess[str]:
+            captured["argv"] = argv
+            captured["input"] = kw.get("input")
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+        monkeypatch.setattr(provision.subprocess, "run", fake_tee)
         provision.ensure_bind_mount(Path("/mnt/real"), Path("/srv/gh-runners"))
-        assert any("/etc/fstab" in ln for ln in fake_run.command_lines)
+
+        assert captured["argv"] == ["sudo", "-n", "tee", "-a", str(provision.FSTAB)]
+        written = captured["input"]
+        assert written == "/mnt/real  /srv/gh-runners  none  bind  0 0\n"
+        assert "\\n" not in str(written), "literal backslash-n in fstab"
+        assert str(written).endswith("\n"), "missing terminating newline"
+
+    def test_does_not_join_an_unterminated_last_line(
+        self, fake_run: FakeRun, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The old writer left fstab without a trailing newline, so the next
+        append -- by this tool or by an admin -- would concatenate onto that
+        line and produce an unparseable entry."""
+        monkeypatch.setattr(Path, "is_dir", lambda self: True)
+        monkeypatch.setattr(
+            Path, "read_text", lambda self: "UUID=x / ext4 defaults 0 1"
+        )
+        fake_run.when("mountpoint", returncode=0)
+        captured: dict[str, object] = {}
+        monkeypatch.setattr(
+            provision.subprocess,
+            "run",
+            lambda argv, **kw: (
+                captured.__setitem__("input", kw.get("input")),
+                subprocess.CompletedProcess(argv, 0, "", ""),
+            )[1],
+        )
+        provision.ensure_bind_mount(Path("/mnt/real"), Path("/srv/gh-runners"))
+        assert str(captured["input"]).startswith("\n")
+
+    def test_fstab_append_failure_is_not_reported_as_success(
+        self, fake_run: FakeRun, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A failed append meant the mount worked now and vanished at the
+        next reboot, with changed=True reported either way."""
+        monkeypatch.setattr(Path, "is_dir", lambda self: True)
+        monkeypatch.setattr(Path, "read_text", lambda self: "")
+        fake_run.when("mountpoint", returncode=0)
+        monkeypatch.setattr(
+            provision.subprocess,
+            "run",
+            lambda argv, **kw: subprocess.CompletedProcess(argv, 1, "", "denied"),
+        )
+        with pytest.raises(provision.ProvisionError, match="survive a reboot"):
+            provision.ensure_bind_mount(Path("/mnt/real"), Path("/srv/gh-runners"))
 
     def test_does_not_duplicate_an_existing_fstab_entry(
         self, fake_run: FakeRun, monkeypatch: pytest.MonkeyPatch
@@ -312,7 +382,7 @@ class TestRemoveBindMount:
             is True
         )
         assert fake_run.ran("umount /srv/gh-runners")
-        assert any("/etc/fstab" in ln for ln in fake_run.command_lines)
+        assert any(str(provision.FSTAB) in ln for ln in fake_run.command_lines)
 
     def test_noop_when_nothing_is_mounted_or_recorded(
         self, fake_run: FakeRun, monkeypatch: pytest.MonkeyPatch

@@ -23,6 +23,7 @@ class TestOptionalOrgConfig:
     def test_extra_labels_are_appended(
         self,
         fake_run: FakeRun,
+        fake_subprocess_run: list[dict[str, Any]],
         config_file: Path,
         tmp_path: Path,
         fake_uid: None,
@@ -66,6 +67,7 @@ class TestOptionalOrgConfig:
     def test_non_default_runner_group_is_passed(
         self,
         fake_run: FakeRun,
+        fake_subprocess_run: list[dict[str, Any]],
         config_file: Path,
         tmp_path: Path,
         fake_uid: None,

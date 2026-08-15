@@ -23,14 +23,31 @@ class TestApplyRestartsAfterEnvChange:
     runners do not actually have.
     """
 
-    def test_restarts_the_orgs_runners(
+    def test_restarts_only_the_drifted_runner(
         self, fake_run: FakeRun, cfg: Any, fake_uid: None
     ) -> None:
+        """Restarting the whole org for one drifted .env killed every
+        in-flight job in it. Since F1 guaranteed drift after every setup,
+        that meant re-running setup — which the design says must be safe —
+        killed all of them, every time."""
         report = Report()
         report.add("TestOrg/runner-1: .env", State.DRIFT, "stale", lambda: None)
         rec.apply(report, cfg)
         assert fake_run.ran("restart gh-runner-test@1.service")
-        assert fake_run.ran("restart gh-runner-test@2.service")
+        assert not fake_run.ran("restart gh-runner-test@2.service")
+
+    def test_a_busy_runner_is_not_restarted(
+        self, fake_run: FakeRun, cfg: Any, fake_uid: None
+    ) -> None:
+        """`restart` waits for jobs; apply used to just fire. A CI job is
+        work that cannot be regenerated, which this module's own rule says
+        repair must never destroy."""
+        # shlex.join quotes the pattern, so match on the bare token.
+        fake_run.when("pgrep", returncode=0, stdout="4242\n")
+        report = Report()
+        report.add("TestOrg/runner-1: .env", State.DRIFT, "stale", lambda: None)
+        rec.apply(report, cfg)
+        assert not fake_run.ran("restart gh-runner-test@1.service")
 
     def test_no_restart_when_nothing_touched_env(
         self, fake_run: FakeRun, cfg: Any, fake_uid: None
@@ -132,3 +149,26 @@ class TestVerifyCargoTools:
         out = capsys.readouterr().out
         assert "MISSING" in out
         assert "cargo install just" in out
+
+
+class TestBusyProbe:
+    def test_absent_evidence_is_treated_as_busy(
+        self, fake_run: FakeRun, cfg: Any, fake_uid: None
+    ) -> None:
+        """pgrep exits 1 for "no match" and >1 for its own failures. Only 1
+        is a trustworthy "not busy" — anything else means the probe could
+        not answer, and the cost of guessing wrong is a killed CI job."""
+        fake_run.when("pgrep", returncode=2)
+        report = Report()
+        report.add("TestOrg/runner-1: .env", State.DRIFT, "stale", lambda: None)
+        rec.apply(report, cfg)
+        assert not fake_run.ran("restart gh-runner-test@1.service")
+
+    def test_no_match_means_free_to_restart(
+        self, fake_run: FakeRun, cfg: Any, fake_uid: None
+    ) -> None:
+        fake_run.when("pgrep", returncode=1)
+        report = Report()
+        report.add("TestOrg/runner-1: .env", State.DRIFT, "stale", lambda: None)
+        rec.apply(report, cfg)
+        assert fake_run.ran("restart gh-runner-test@1.service")

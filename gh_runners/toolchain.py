@@ -266,31 +266,62 @@ def _per_runner_state(rdir: Path) -> list[str]:
     return _per_runner_state_lines(rdir)
 
 
+def runner_env(org: OrgConfig, idx: int, tc_dir: Path) -> str:
+    """The exact ``.env`` contents for one runner. **The only generator.**
+
+    `setup` writes this and `reconcile` compares against it, so the byte
+    comparison in ``check_runner_env`` is a file checked against its own
+    generator. That is what reconcile's docstring always claimed and what
+    was never true: there used to be a second, independent derivation here,
+    and the two disagreed about PATH (``<tc>/python/bin``, cuda, the go
+    tree), about ``DOCKER_HOST``, about whether ``RUSTUP_HOME`` was
+    conditional, and about key order.
+
+    Every `setup` therefore ended by declaring all 20 freshly-written files
+    drifted and rewriting them — "repaired 20" on a fleet setup had just
+    built — while `setup-toolchain` silently stripped ``DOCKER_HOST`` from
+    every runner and broke testcontainers on the next restart. Same shape as
+    the TMPDIR bug: one fact, two homes, and the disagreement only visible
+    as flakiness far from the cause.
+
+    Anything derived from the toolchain (PATH, RUSTUP_HOME, GOROOT) comes
+    from :func:`toolchain_env`; anything per-runner comes from
+    ``_RUNNER_STATE``. Neither is restated here.
+    """
+    rdir = org.runner_dir(idx)
+    gcloud_dir, docker_dir = _cloud_config_paths(rdir)
+
+    lines = [f"{k}={v}" for k, v in toolchain_env(tc_dir).items()]
+    lines += _per_runner_state_lines(rdir)
+    lines += [
+        # Each runner gets its own temp, never the operator's. This used to
+        # read TMPDIR from os.environ, so `setup` baked the calling shell's
+        # value into all ten .env files — on this host /home/nazq/dev/.tmp,
+        # which the ghr-* users cannot write to. Jobs failed wherever a tool
+        # honoured TMPDIR rather than RUNNER_TEMP: prost-build died with
+        # EACCES mid-`cargo clippy`.
+        f"TMPDIR={rdir}/_tmp",
+        f"TMP={rdir}/_tmp",
+        f"TEMP={rdir}/_tmp",
+        f"CLOUDSDK_CONFIG={gcloud_dir}",
+        f"DOCKER_CONFIG={docker_dir}",
+    ]
+    if org.isolated:
+        # Rootless podman's socket lives in the runner's own XDG runtime
+        # dir, so this is per-identity and only meaningful when isolated.
+        lines.append(
+            f"DOCKER_HOST=unix:///run/user/{priv._uid(org.runner_user)}/podman/podman.sock"
+        )
+    return "\n".join(lines) + "\n"
+
+
 def write_runner_env(org: OrgConfig, tc_dir: Path) -> None:
     """Write .env and .path files for each runner in an org."""
-    env = toolchain_env(tc_dir)
-
-    base_env_lines = [f"{k}={v}" for k, v in env.items()]
-    path_contents = env["PATH"]
+    path_contents = toolchain_env(tc_dir)["PATH"]
 
     for i in range(1, org.runner_count + 1):
         rdir = org.runner_dir(i)
-
-        # Each runner gets its own temp, never the operator's. This used to
-        # read TMPDIR from os.environ, which meant `setup` baked the calling
-        # shell's value into all ten .env files — on this host that is
-        # /home/nazq/dev/.tmp, which the ghr-* users cannot write to. Jobs
-        # then failed wherever a tool honoured TMPDIR rather than
-        # RUNNER_TEMP: prost-build died with EACCES mid-`cargo clippy`, and
-        # a bare `mktemp` in a workflow failed the same way. reconcile.py
-        # already used the per-runner form, so the two paths disagreed and
-        # a reconcile silently "fixed" what setup had just written.
-        env_lines = [
-            *base_env_lines,
-            f"TMPDIR={rdir}/_tmp",
-            f"TMP={rdir}/_tmp",
-            f"TEMP={rdir}/_tmp",
-        ]
+        content = runner_env(org, i, tc_dir)
 
         # `setup` runs under sudo, so writing these directly would create
         # them root-owned inside a runner's home — the runner could then
@@ -302,30 +333,14 @@ def write_runner_env(org: OrgConfig, tc_dir: Path) -> None:
             u = org.runner_user
             if not priv.exists_as(u, rdir):
                 continue
-            gcloud_dir, docker_dir = _cloud_config_paths(rdir)
             _write_cloud_config_as(u, rdir)
             _create_state_dirs_as(u, rdir)
-            runner_lines = (
-                env_lines
-                + _per_runner_state_lines(rdir)
-                + [
-                    f"CLOUDSDK_CONFIG={gcloud_dir}",
-                    f"DOCKER_CONFIG={docker_dir}",
-                ]
-            )
-            priv.write_as(u, rdir / ".env", "\n".join(runner_lines) + "\n")
+            priv.write_as(u, rdir / ".env", content)
             priv.write_as(u, rdir / ".path", path_contents + "\n")
         elif rdir.exists():
-            gcloud_dir, docker_dir = _write_cloud_config(rdir)
-            runner_lines = (
-                env_lines
-                + _per_runner_state(rdir)
-                + [
-                    f"CLOUDSDK_CONFIG={gcloud_dir}",
-                    f"DOCKER_CONFIG={docker_dir}",
-                ]
-            )
-            (rdir / ".env").write_text("\n".join(runner_lines) + "\n")
+            _write_cloud_config(rdir)
+            _create_state_dirs(rdir)
+            (rdir / ".env").write_text(content)
             (rdir / ".path").write_text(path_contents + "\n")
 
 

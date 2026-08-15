@@ -12,6 +12,7 @@ Each function is idempotent and returns whether it changed anything, so
 from __future__ import annotations
 
 import re
+import subprocess
 import time
 
 from pathlib import Path
@@ -25,6 +26,12 @@ from gh_runners.config import OrgConfig
 # ghr-peg could not create its home inside it.
 RUNNER_HOME_ROOT = Path("/srv/gh-runners")
 TOOLCHAIN_ROOT = Path("/opt/gh-runners")
+
+# Named rather than inlined so tests can point it at a fixture file. Reading
+# the developer's real fstab made `ensure_bind_mount` take a different branch
+# on a host that already had the entry than on a clean one, and the tests
+# that drive `setup` silently exercised only the former.
+FSTAB = Path("/etc/fstab")
 
 
 def ensure_shared_roots() -> bool:
@@ -77,10 +84,36 @@ def ensure_bind_mount(real: Path, mount: Path) -> bool:
         priv.as_root(["mount", "--bind", str(real), str(mount)], check=False)
         changed = True
 
-    fstab = Path("/etc/fstab").read_text()
+    fstab = FSTAB.read_text()
     if f"{real} " not in fstab and f"{real}\t" not in fstab:
+        # `printf '%s' {entry!r}` put a Python repr inside shell quotes, so
+        # the trailing newline was appended as the two characters \ and n —
+        # junk in the fs_passno field, and no terminating newline, meaning
+        # the *next* append (by this tool, or by an admin) concatenates onto
+        # the same line and produces an entry that can drop the boot to
+        # emergency mode. tee -a takes the content on stdin, so there is no
+        # quoting layer to get wrong.
         entry = f"{real}  {mount}  none  bind  0 0\n"
-        priv.as_root(["sh", "-c", f"printf '%s' {entry!r} >> /etc/fstab"], check=False)
+        if fstab and not fstab.endswith("\n"):
+            # Never join onto someone else's unterminated last line — which
+            # is exactly what the old writer left behind for the next caller.
+            entry = "\n" + entry
+        appended = subprocess.run(
+            ["sudo", "-n", "tee", "-a", str(FSTAB)],
+            input=entry,
+            text=True,
+            stdout=subprocess.DEVNULL,
+            check=False,
+        )
+        if appended.returncode != 0:
+            # Silently reporting changed=True here meant the bind mount
+            # worked now and vanished at the next reboot.
+            raise ProvisionError(
+                f"could not append the bind mount for {real} to /etc/fstab "
+                f"(tee exited {appended.returncode}).\n"
+                f"  The mount is active now but will not survive a reboot.\n"
+                f"  Add this line by hand:\n    {entry.strip()}"
+            )
         changed = True
     return changed
 
@@ -239,6 +272,15 @@ def remove_user(org: OrgConfig, *, purge_home: bool = True) -> bool:
     return True
 
 
+class ProvisionError(RuntimeError):
+    """Host provisioning failed in a way the operator must act on.
+
+    Raised rather than returned: a provisioning step that half-works and
+    reports success is how a bind mount ends up active today and absent
+    after the next reboot.
+    """
+
+
 class RemovalError(RuntimeError):
     """Teardown could not complete. The host is in a known, stated state."""
 
@@ -275,10 +317,8 @@ def remove_bind_mount(real: Path, mount: Path) -> bool:
     if priv.as_root(["mountpoint", "-q", str(mount)], check=False).returncode == 0:
         priv.as_root(["umount", str(mount)], check=False)
         changed = True
-    fstab = Path("/etc/fstab").read_text()
+    fstab = FSTAB.read_text()
     if str(real) in fstab:
-        priv.as_root(
-            ["sed", "-i", f"\\|^{real}[[:space:]]|d", "/etc/fstab"], check=False
-        )
+        priv.as_root(["sed", "-i", f"\\|^{real}[[:space:]]|d", str(FSTAB)], check=False)
         changed = True
     return changed

@@ -290,31 +290,13 @@ def runner_user() -> str | None:
     return os.environ.get(_RUNNER_USER_ENV_VAR) or None
 
 
-def systemctl_user(*args: str) -> subprocess.CompletedProcess[str]:
-    """Run `systemctl --user ...` against the runner's systemd manager."""
-    user = runner_user()
-    if user is None:
-        return run_cmd(["systemctl", "--user", *args])
-
-    # pwd is Unix-only; import lazily so this module still imports on Windows,
-    # where the dedicated-user model does not apply (native services instead).
-    import pwd
-
-    uid = pwd.getpwnam(user).pw_uid
-    return run_cmd(
-        [
-            "sudo",
-            "-u",
-            user,
-            "-H",
-            "env",
-            f"XDG_RUNTIME_DIR=/run/user/{uid}",
-            f"DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{uid}/bus",
-            "systemctl",
-            "--user",
-            *args,
-        ]
-    )
+# systemctl_user lived here as a twin of privilege.systemctl_user, and
+# used `sudo -u` WITHOUT `-n` — the omission privilege.py exists to warn
+# about, since a failed password prompt exits non-zero with empty stdout
+# and reads as a real answer. It had no callers; every real one goes
+# through privilege. Deleted rather than fixed: a second implementation of
+# an identity-sensitive operation is the shape that produced the .env and
+# TMPDIR bugs, and the safest version of it is the one that is not there.
 
 
 def systemd_user_dir() -> Path:
@@ -323,7 +305,7 @@ def systemd_user_dir() -> Path:
     if user is None:
         return Path.home() / ".config" / "systemd" / "user"
 
-    import pwd  # Unix-only; see systemctl_user()
+    import pwd  # Unix-only; imported lazily so this module loads on Windows
 
     return Path(pwd.getpwnam(user).pw_dir) / ".config" / "systemd" / "user"
 

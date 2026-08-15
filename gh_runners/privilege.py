@@ -143,8 +143,18 @@ def as_root(
 
     Never use this to create anything inside a runner's home — that is what
     :func:`as_user` and :func:`write_as` are for.
+
+    ``-n`` for the reason this module's header already gives for every other
+    call: without it, a run without root blocks on a password prompt, and if
+    that prompt fails the command exits non-zero with *empty stdout* —
+    indistinguishable from a command that ran and reported nothing. This
+    function was the one place that omitted it, so a `capture=True` read
+    here (``getent passwd``, ``loginctl show-user``, ``id -Gn``) could hand
+    back "" and be believed. Escalation is arranged up front by
+    :func:`gh_runners.escalation.ensure_root`, so there is nothing to prompt
+    for by the time this runs.
     """
-    return run_cmd(["sudo", *argv], check=check, capture=capture)
+    return run_cmd(["sudo", "-n", *argv], check=check, capture=capture)
 
 
 def write_as(user: str, path: Path, content: str, *, mode: str = "644") -> None:
