@@ -27,6 +27,12 @@ from gh_runners.config import OrgConfig
 RUNNER_HOME_ROOT = Path("/srv/gh-runners")
 TOOLCHAIN_ROOT = Path("/opt/gh-runners")
 
+# Named rather than inlined so tests can point it at a fixture file. Reading
+# the developer's real fstab made `ensure_bind_mount` take a different branch
+# on a host that already had the entry than on a clean one, and the tests
+# that drive `setup` silently exercised only the former.
+FSTAB = Path("/etc/fstab")
+
 
 def ensure_shared_roots() -> bool:
     """Create the root-owned parent directories."""
@@ -78,7 +84,7 @@ def ensure_bind_mount(real: Path, mount: Path) -> bool:
         priv.as_root(["mount", "--bind", str(real), str(mount)], check=False)
         changed = True
 
-    fstab = Path("/etc/fstab").read_text()
+    fstab = FSTAB.read_text()
     if f"{real} " not in fstab and f"{real}\t" not in fstab:
         # `printf '%s' {entry!r}` put a Python repr inside shell quotes, so
         # the trailing newline was appended as the two characters \ and n —
@@ -93,7 +99,7 @@ def ensure_bind_mount(real: Path, mount: Path) -> bool:
             # is exactly what the old writer left behind for the next caller.
             entry = "\n" + entry
         appended = subprocess.run(
-            ["sudo", "-n", "tee", "-a", "/etc/fstab"],
+            ["sudo", "-n", "tee", "-a", str(FSTAB)],
             input=entry,
             text=True,
             stdout=subprocess.DEVNULL,
@@ -311,10 +317,8 @@ def remove_bind_mount(real: Path, mount: Path) -> bool:
     if priv.as_root(["mountpoint", "-q", str(mount)], check=False).returncode == 0:
         priv.as_root(["umount", str(mount)], check=False)
         changed = True
-    fstab = Path("/etc/fstab").read_text()
+    fstab = FSTAB.read_text()
     if str(real) in fstab:
-        priv.as_root(
-            ["sed", "-i", f"\\|^{real}[[:space:]]|d", "/etc/fstab"], check=False
-        )
+        priv.as_root(["sed", "-i", f"\\|^{real}[[:space:]]|d", str(FSTAB)], check=False)
         changed = True
     return changed

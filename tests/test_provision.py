@@ -122,7 +122,7 @@ class TestEnsureBindMount:
         monkeypatch.setattr(provision.subprocess, "run", fake_tee)
         provision.ensure_bind_mount(Path("/mnt/real"), Path("/srv/gh-runners"))
 
-        assert captured["argv"] == ["sudo", "-n", "tee", "-a", "/etc/fstab"]
+        assert captured["argv"] == ["sudo", "-n", "tee", "-a", str(provision.FSTAB)]
         written = captured["input"]
         assert written == "/mnt/real  /srv/gh-runners  none  bind  0 0\n"
         assert "\\n" not in str(written), "literal backslash-n in fstab"
@@ -382,7 +382,7 @@ class TestRemoveBindMount:
             is True
         )
         assert fake_run.ran("umount /srv/gh-runners")
-        assert any("/etc/fstab" in ln for ln in fake_run.command_lines)
+        assert any(str(provision.FSTAB) in ln for ln in fake_run.command_lines)
 
     def test_noop_when_nothing_is_mounted_or_recorded(
         self, fake_run: FakeRun, monkeypatch: pytest.MonkeyPatch

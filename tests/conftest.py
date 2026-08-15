@@ -176,6 +176,29 @@ def _no_real_subprocess(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _isolated_fstab(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Point `/etc/fstab` at an empty file no test shares with the host.
+
+    `ensure_bind_mount` branches on whether the entry is already present, so
+    reading the real fstab made that branch depend on whether this tool had
+    ever been run for real on the machine. Where the entry existed the
+    append was skipped and the `setup` tests sailed past it; on a clean host
+    the same tests reached the append, tripped the `_no_real_subprocess`
+    backstop, and `setup` aborted before configuring a single runner —
+    visible only as an empty command list.
+
+    Pinned here rather than per-test for the same reason as `is_linux`: a
+    host-dependent branch is not something each test should have to
+    remember to neutralise.
+    """
+    from gh_runners import provision
+
+    fstab = tmp_path / "fstab"
+    fstab.write_text("")
+    monkeypatch.setattr(provision, "FSTAB", fstab)
+
+
+@pytest.fixture(autouse=True)
 def _no_escalation_prompt(monkeypatch: pytest.MonkeyPatch) -> None:
     """Grant root without prompting, and reset the per-process cache.
 
