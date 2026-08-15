@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v2.1.0 (2026-08-15)
+
+### Testing
+
+- Stop the setup tests depending on the host's /etc/fstab
+  ([`45dcadd`](https://github.com/nazq/gh_runners/commit/45dcadd986ea5e4ca3de1e62e33c5f638dd51190))
+
+
 ## v2.0.0 (2026-08-15)
 
 ### Bug Fixes
