@@ -114,6 +114,8 @@ def fake_run(monkeypatch: pytest.MonkeyPatch) -> FakeRun:
         "gh_runners.reconcile",
         "gh_runners.escalation",
         "gh_runners.slices",
+        "gh_runners.fpq",
+        "gh_runners.clone_target",
     ):
         monkeypatch.setattr(f"{mod}.run_cmd", fake, raising=False)
     return fake

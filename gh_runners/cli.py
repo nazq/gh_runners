@@ -54,6 +54,13 @@ slice_app = typer.Typer(
 )
 app.add_typer(slice_app, name="slice")
 
+fpq_app = typer.Typer(
+    help="Whole-job build admission for the operator/agent domain "
+    "(per-class task-spooler queues).",
+    no_args_is_help=True,
+)
+app.add_typer(fpq_app, name="fpq")
+
 # Common option types
 Org = Annotated[Optional[str], typer.Option("--org", help="Target a specific org.")]
 Token = Annotated[
@@ -1270,10 +1277,10 @@ def logs(
 # ---------------------------------------------------------------------------
 
 
-def _require_linux(what: str) -> None:
-    """cgroup v2 and systemd slices exist only on Linux."""
+def _require_linux(what: str, why: str = "manages cgroup v2 slices") -> None:
+    """cgroup v2, systemd slices, /proc and unix sockets: Linux territory."""
     if not is_linux():
-        print(f"ERROR: {what} manages cgroup v2 slices and is Linux-only.")
+        print(f"ERROR: {what} {why} and is Linux-only.")
         raise typer.Exit(1)
 
 
@@ -1423,6 +1430,183 @@ def _apply_build_lock_conf(sc: SliceConfig, *, can_run: bool) -> None:
     # applies the entry now, and the aging exemption with it.
     as_root(["systemd-tmpfiles", "--create", str(sl.TMPFILES_PATH)], check=False)
     print(f"  {sl.TMPFILES_PATH}: written (owner {owner}), lock created")
+
+
+# ---------------------------------------------------------------------------
+# fpq — whole-job admission queue for the operator/agent domain
+# ---------------------------------------------------------------------------
+
+
+def _fpq_class_slots(job_class: str) -> int:
+    """The slot count for a class, or a usage error listing the classes."""
+    cfg = load_config()
+    slots = cfg.fpq.slots
+    if job_class not in slots:
+        print(f"ERROR: unknown fpq class '{job_class}'.")
+        print(
+            f"Available: {', '.join(sorted(slots))} (extend via [fpq] in config.toml)"
+        )
+        raise typer.Exit(2)
+    return slots[job_class]
+
+
+@fpq_app.command("run")
+def fpq_run(
+    command: Annotated[
+        list[str],
+        typer.Argument(help="Command to queue; put it after `--`."),
+    ],
+    job_class: Annotated[
+        str,
+        typer.Option("--class", help="Admission class (a key of [fpq] slots)."),
+    ],
+    prio: Annotated[
+        bool,
+        typer.Option("--prio", help="Jump to the front of the class queue."),
+    ] = False,
+    no_scope: Annotated[
+        bool,
+        typer.Option(
+            "--no-scope",
+            help="Skip the systemd-run scope wrapper (no user manager, e.g. CI).",
+        ),
+    ] = False,
+) -> None:
+    """Queue a command in its class and block until it finishes.
+
+    Exits with the command's own exit code — the queue must be
+    transparent to whatever scripted around it. The host build lock is
+    NOT taken here: the recipes take it inside the job, and holding it
+    around them would deadlock their inner acquisition.
+    """
+    from gh_runners import fpq as fq
+
+    _require_linux("fpq", "drives per-user task-spooler daemons and systemd scopes")
+    slots = _fpq_class_slots(job_class)
+    try:
+        fq.ensure_daemon(job_class, slots)
+        job_id = fq.enqueue(job_class, fq.wrapped_command(command, no_scope=no_scope))
+        if prio:
+            fq.bump(job_class, job_id)
+    except fq.FpqError as e:
+        print(f"ERROR: {e}")
+        raise typer.Exit(2) from None
+
+    row = fq.journal_start(job_class, command)
+    print(f"fpq: {job_class} job {job_id} queued", file=sys.stderr)
+    fq.wait_for_start(job_class, job_id)
+    fq.stream(job_class, job_id)
+    exit_code = fq.wait_exit(job_class, job_id)
+    fq.journal_end(
+        row,
+        exit_code=exit_code,
+        run_seconds=fq.parse_run_seconds(fq.job_info(job_class, job_id)),
+    )
+    raise typer.Exit(exit_code)
+
+
+@fpq_app.command("status")
+def fpq_status() -> None:
+    """Show every class's queue: running/queued jobs, ages, exit codes."""
+    from gh_runners import fpq as fq
+
+    _require_linux("fpq", "drives per-user task-spooler daemons and systemd scopes")
+    cfg = load_config()
+    for job_class in sorted(cfg.fpq.slots):
+        slots = cfg.fpq.slots[job_class]
+        print(f"\n[{job_class}] slots={slots}")
+        if not fq.socket_path(job_class).exists():
+            print("  no daemon (nothing queued yet)")
+            continue
+        jobs = fq.list_jobs(job_class)
+        if not jobs:
+            print("  empty")
+            continue
+        print(f"  {'ID':<5} {'State':<10} {'Age':<8} {'Exit':<5} Command")
+        for j in jobs:
+            age = ""
+            if j.state in ("running", "queued"):
+                enq = fq.parse_enqueue_time(fq.job_info(job_class, j.job_id))
+                if enq is not None:
+                    age = fq.format_age(time.time() - enq)
+            exit_s = "-" if j.exit_code is None else str(j.exit_code)
+            print(f"  {j.job_id:<5} {j.state:<10} {age:<8} {exit_s:<5} {j.command}")
+
+
+@fpq_app.command("bump")
+def fpq_bump(
+    job_class: Annotated[str, typer.Argument(help="The job's class.")],
+    job_id: Annotated[int, typer.Argument(help="tsp job id (see fpq status).")],
+) -> None:
+    """Move a queued job to the front of its class queue."""
+    from gh_runners import fpq as fq
+
+    _require_linux("fpq", "drives per-user task-spooler daemons and systemd scopes")
+    _fpq_class_slots(job_class)
+    if not fq.socket_path(job_class).exists():
+        print(f"ERROR: no daemon for class '{job_class}'.")
+        raise typer.Exit(1)
+    if fq.bump(job_class, job_id):
+        print(f"fpq: job {job_id} moved to the front of '{job_class}'")
+    else:
+        print(f"ERROR: could not bump job {job_id} in '{job_class}'.")
+        raise typer.Exit(1)
+
+
+# ---------------------------------------------------------------------------
+# clone-target — hardlink dependency artifacts into a fresh worktree
+# ---------------------------------------------------------------------------
+
+
+@app.command("clone-target")
+def clone_target_cmd(
+    src: Annotated[
+        Path, typer.Argument(help="Source worktree with a built target dir.")
+    ],
+    dst: Annotated[Path, typer.Argument(help="Destination worktree.")],
+    profile: Annotated[
+        str, typer.Option("--profile", help="Cargo profile directory to clone.")
+    ] = "debug",
+    require_quiescent: Annotated[
+        bool,
+        typer.Option(
+            "--require-quiescent",
+            help="Refuse if cargo/rustc is running under the source worktree.",
+        ),
+    ] = False,
+) -> None:
+    """Hardlink a target dir's immutable dependency artifacts into dst.
+
+    Workspace-member artifacts are excluded (they are what dst exists to
+    rebuild) and incremental/ is never cloned. Never copies bytes: a
+    destination on another filesystem is an error.
+    """
+    from gh_runners import clone_target as ct
+
+    _require_linux("clone-target", "inspects /proc and hardlinks target dirs")
+    try:
+        if require_quiescent:
+            pids = ct.active_builders(src)
+            if pids:
+                print(
+                    "ERROR: build in flight under source worktree "
+                    f"(pids {', '.join(map(str, pids))}); artifacts would be torn."
+                )
+                raise typer.Exit(1)
+        members = ct.workspace_members(src)
+        report = ct.clone_profile(
+            src / "target" / profile, dst / "target" / profile, members
+        )
+    except ct.CloneError as e:
+        print(f"ERROR: {e}")
+        raise typer.Exit(1) from None
+
+    print(
+        f"linked {report.files_linked} files, "
+        f"deduped {ct.format_bytes(report.bytes_deduped)}, "
+        f"skipped {report.entries_skipped_workspace} workspace entries, "
+        f"elapsed {report.elapsed_seconds:.2f}s"
+    )
 
 
 def main() -> None:

@@ -117,6 +117,22 @@ crates = "cargo-llvm-cov just tauri-cli"
 # memory_high = "32G"
 # lock_owner = "you"
 
+# ── Linux-only: fpq build admission queue ────────────────────────
+# Per-class slot counts for `gh-runners fpq run` — the whole-job
+# admission queue for the operator/agent side of the host (CI runners
+# do not use fpq; their admission is the runner count plus the slice
+# weights above). Each class gets its own per-user task-spooler daemon;
+# the value caps how many jobs of that class run concurrently. Keys are
+# also what `--class` accepts, so adding a key adds a class.
+#
+# image defaults to 1: container builds duplicate the whole compile
+# inside a namespace where the shared jobserver is unreachable, so two
+# at once means two ungoverned full builds.
+# [fpq]
+# compile = 2
+# itest = 2
+# image = 1
+
 # ── Organizations ────────────────────────────────────────────────
 # Define one [[org]] block per GitHub organization.
 
