@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v1.2.0 (2026-08-15)
+
+### Features
+
+- Add check-toolchain command for toolchain integrity validation
+  ([#8](https://github.com/nazq/gh_runners/pull/8),
+  [`cfd52ab`](https://github.com/nazq/gh_runners/commit/cfd52ab055c59a4742dbb0d6b284136ed239e482))
+
+
 ## v1.1.0 (2026-02-17)
 
 ### Bug Fixes
