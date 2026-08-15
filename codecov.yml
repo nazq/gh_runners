@@ -1,0 +1,25 @@
+# Codecov configuration.
+#
+# The gate is 95%. `threshold` allows a 0.5% dip so an unrelated PR is not
+# blocked by rounding, but the project target does not drift downward — a
+# real drop still fails.
+coverage:
+  status:
+    project:
+      default:
+        target: 95%
+        threshold: 0.5%
+    patch:
+      default:
+        # New code is held to the same bar as the codebase. A patch that
+        # cannot reach it is usually a patch that needs a seam, not an
+        # exemption.
+        target: 95%
+
+comment:
+  layout: "reach, diff, flags, files"
+  behavior: default
+  require_changes: true
+
+ignore:
+  - "tests/**"

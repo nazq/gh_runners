@@ -9,7 +9,10 @@ dist/
 *.egg-info/
 
 # uv
-uv.lock
+# uv.lock is deliberately COMMITTED, not ignored. Without it CI resolves
+# dependencies fresh on every run, so a new ruff or mypy release changes the
+# lint rules under us and fails a PR that touched none of it. This is an
+# application, not a library — reproducible CI beats floating versions.
 
 # Shared toolchain (installed at runtime)
 shared-toolchain/
@@ -22,3 +25,10 @@ runner-*/
 
 # Plans
 /plans/
+
+# Coverage artifacts
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.pytest_cache/

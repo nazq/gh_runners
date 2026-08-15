@@ -1,7 +1,9 @@
 # gh-runners
 
 [![CI](https://github.com/nazq/gh_runners/actions/workflows/ci.yml/badge.svg)](https://github.com/nazq/gh_runners/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/nazq/gh_runners/branch/main/graph/badge.svg)](https://codecov.io/gh/nazq/gh_runners)
 [![PyPI](https://img.shields.io/pypi/v/gh-runners?color=blue)](https://pypi.org/project/gh-runners/)
+[![Downloads](https://img.shields.io/pypi/dm/gh-runners?color=blue)](https://pypi.org/project/gh-runners/)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-3776ab?logo=python&logoColor=white)](https://python.org)
 [![Typed: mypy strict](https://img.shields.io/badge/typed-mypy%20strict-1674b1?logo=python&logoColor=white)](https://mypy-lang.org)
 [![Linted: ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
@@ -14,18 +16,56 @@ Self-hosted runners save real money on your GitHub Actions bill. GitHub-hosted r
 
 Built primarily for Rust/Tauri/Node CI but works for any workload. Linux and Windows supported. macOS PRs welcome.
 
+> **Security note.** Set `runner_user` on each org (Linux). That gives the
+> runners a dedicated unprivileged account with its own home, and runs
+> containers under rootless Podman instead of a root Docker daemon — so a
+> workflow cannot read your `~/.ssh` keys or reach a Docker socket, and a
+> pull request that triggers CI cannot walk out with your credentials.
+>
+> Leave `runner_user` unset and the runners execute as *whoever ran the
+> tool*. Such a runner can read anything you can and, if you are in the
+> `docker` group, obtain root. That is only appropriate when every workflow
+> able to run on it is one you already trust.
+>
+> [docs/runner-isolation.md](docs/runner-isolation.md) documents the design
+> with measured evidence and re-runnable probes.
+
 ## Install
 
 ```bash
-# From PyPI
+# Run without installing
+uvx gh-runners --help
+
+# Or install as a tool
 uv tool install gh-runners
 
 # Or pip
 pip install gh-runners
-
-# Verify
-gh-runners --help
 ```
+
+## Privileges
+
+**Run as yourself. Never prefix with `sudo`.**
+
+Three identities do the work, and the tool moves between them itself:
+
+| Identity | Does | Examples |
+|---|---|---|
+| **you** | reads config, mints tokens with *your* `gh` auth, calls the GitHub API | `status`, `logs`, `check-host` |
+| **root** | mutates host state, held briefly | `useradd`, `/etc/fstab`, `/etc/subuid`, mounts |
+| **runner** | everything inside a runner's home, as its owner | `config.sh`, caches, `systemctl --user` |
+
+When an operation needs root, you are asked for a password once, with the
+reason stated, and the grant covers the rest of the run.
+
+Running the whole tool under `sudo` breaks it in ways that look like
+unrelated bugs: `gh` reads root's config and reports "not logged in" while
+your own auth is fine, `uv` vanishes from `PATH`, and diagnostics that
+should consult GitHub silently answer from local state instead.
+
+In CI or cron, where there is no terminal to prompt on, privileged
+operations fail immediately with an explanation rather than hanging. Grant
+a passwordless sudo rule for the host if they need to run unattended.
 
 ## Quick Start
 
@@ -41,12 +81,13 @@ cp config.example.toml config.toml
 # 2. Check prerequisites
 gh-runners check-host
 
-# 3. Install isolated toolchain (keeps runners separate from your dev tools)
-gh-runners setup-toolchain
-
-# 4. Setup runners (auto-fetches token via gh CLI, or pass --token)
-gh-runners setup
+# 3. Install the toolchain and the runners in one step.
+#    (--toolchain keeps runners on the versions in config.toml rather than
+#    whatever the host happens to have; omit it if the toolchain is current.)
+gh-runners setup --toolchain
 ```
+
+Run as yourself — never with `sudo`. See [Privileges](#privileges).
 
 ### Windows
 
@@ -79,6 +120,7 @@ All commands support `--org <name>` to target a specific organization.
 | `gh-runners list-packages` | List all available toolchain packages |
 | `gh-runners setup-toolchain` | Install isolated toolchain (Linux) or verify versions (Windows) |
 | `gh-runners setup` | Download, configure, install as services |
+| `gh-runners setup --toolchain` | The above, preceded by `setup-toolchain` |
 | `gh-runners status` | Show all runner service states and active jobs |
 | `gh-runners start` | Start all runner services |
 | `gh-runners stop` | Stop all runner services |
@@ -104,13 +146,23 @@ poll_interval = 10
 
 # Pluggable toolchain — each package gets its own sub-table
 [toolchain]
-packages = ["rust", "node", "cargo-tools"]
+packages = ["rust", "node", "cargo-tools", "python"]
 
+# rust, node and python accept `extra_versions`: additional versions kept
+# alongside the default, for repos that pin one. Each lands in its own
+# directory, so a repo on an older version and one on the default can
+# build concurrently on the same host.
 [toolchain.rust]
-version = "1.88.0"
+version = "1.97"
+extra_versions = ["1.92.0"]
 
-[toolchain.node]
+[toolchain.node]          # installed by fnm
 version = "22.14.0"
+extra_versions = ["20.19.0"]
+
+[toolchain.python]        # installed by uv
+version = "3.13"
+extra_versions = ["3.11", "3.12", "3.14"]
 
 [toolchain.cargo-tools]
 crates = "cargo-llvm-cov just tauri-cli"
@@ -138,7 +190,7 @@ extra_labels = ""
 
 Each package is a TOML sub-table under `[toolchain]`. The `packages` array controls which ones are installed. Run `gh-runners list-packages` to see all available packages and their supported architectures.
 
-Built-in packages: `rust`, `node`, `cargo-tools`, `go`, `pnpm`, `bun`.
+Built-in packages: `rust`, `node`, `cargo-tools`, `go`, `pnpm`, `bun`, `pwsh`, `python`.
 
 > **Note:** Some cargo crates (especially `tauri-cli`) take 15+ minutes to compile on first install. This is normal for Rust — subsequent installs are cached.
 
@@ -146,21 +198,47 @@ Built-in packages: `rust`, `node`, `cargo-tools`, `go`, `pnpm`, `bun`.
 
 ### Linux: Toolchain Isolation
 
-Runners use an isolated shared toolchain (`~/.gh-runners/shared-toolchain/`) with their own `RUSTUP_HOME`, `CARGO_HOME`, and Node.js — completely separate from your personal `~/.cargo` and `~/.nvm`. The systemd service files load each runner's `.env` file via `EnvironmentFile=` so runners never see your dev tools.
+Runners share one toolchain at `/opt/gh-runners/toolchain` with its own
+`RUSTUP_HOME` and Node.js, separate from your personal `~/.cargo` and
+`~/.nvm`. It lives outside any home directory because a home is
+`drwxr-x---`, and a runner user cannot traverse into one however the
+toolchain itself is owned. Each systemd unit loads that runner's `.env` via
+`EnvironmentFile=`, so runners never see your dev tools.
+
+`RUSTUP_HOME` is shared — rustup only reads from it during a build.
+**Everything a build writes to is per-runner**: `CARGO_HOME`, the npm, uv,
+pip, pnpm and Go caches, plus `CLOUDSDK_CONFIG` and `DOCKER_CONFIG`. A
+shared `CARGO_HOME` fails outright (`failed to create directory
+<CARGO_HOME>/git/db/<dep>`), and a shared cloud config is how
+`google-github-actions/auth` ends up overwriting your active `gcloud`
+account with a credential that dies when the job does.
+
+With `runner_user` set, each org's runners also get their own unprivileged
+account, so a workflow cannot read your files at all. See
+[docs/runner-isolation.md](docs/runner-isolation.md) for that design and the
+evidence behind it.
+
+With `runner_user` set (the isolated layout):
 
 ```
-~/.gh-runners/
-├── shared-toolchain/    # Isolated Rust + Node + whatever you configure
-│   ├── .rustup/
-│   ├── .cargo/
-│   └── node/
-├── MyOrg/
-│   ├── runner-1/        # Runner installation + _work/
-│   ├── runner-2/
-│   └── ...
-└── AnotherOrg/
-    └── ...
+/opt/gh-runners/toolchain/     # root:root 0755 — readable by every runner
+├── .rustup/                   #   shared: rustup only reads it at build time
+├── .cargo/bin/                #   binaries on PATH; CARGO_HOME is elsewhere
+└── node/
+
+/srv/gh-runners/               # root:root 0755 — each runner owns its subtree
+└── ghr-myorg/                 # drwx------ ghr-myorg
+    └── MyOrg/
+        ├── runner-1/          # installation + _work/
+        │   ├── .env           # per-runner CARGO_HOME, caches, cloud config
+        │   ├── .cargo/        # written to by builds, so never shared
+        │   ├── .gcloud/
+        │   └── .docker/
+        └── runner-2/
 ```
+
+Without `runner_user`, everything lives under `~/.gh-runners/` owned by you,
+and the toolchain falls back to `~/.gh-runners/shared-toolchain/`.
 
 ### Windows
 
@@ -210,16 +288,37 @@ jobs:
 ## Development
 
 ```bash
-just check      # Run all checks (lint + typecheck)
+just check       # Everything CI runs: lint + typecheck + tests
 just lint        # Ruff lint + format check
 just fix         # Auto-fix lint issues and format
 just typecheck   # mypy --strict
+just test        # pytest with the 95% coverage gate
+just test-fast   # pytest without coverage — faster inner loop
+just coverage    # HTML coverage report
 just run status  # Run any gh-runners command via uv
 ```
 
+### Testing
+
+**No test touches the real system.** This tool creates user accounts, edits
+`/etc/fstab` and `/etc/subuid`, and runs `userdel -r` — a suite that could
+execute any of that for real would be more dangerous than no suite.
+
+Every subprocess goes through `platform.run_cmd`, so the `fake_run` fixture
+severs all of them at once, and an autouse backstop fails any test that
+reaches `subprocess` directly. Filesystem writes take an explicit path, so
+`tmp_path` covers the rest. If you add a call site that bypasses `run_cmd`,
+a test will tell you rather than your machine finding out.
+
+Coverage must stay at or above 95% (`fail_under` in `pyproject.toml`, plus
+the Codecov project and patch gates). Platform-specific branches are *not*
+excluded from that number — the suite stubs `is_windows`/`is_linux` so both
+halves are reachable from any host.
+
 ## Contributing
 
-PRs welcome, especially for macOS support. Run `just check` before submitting — it must pass clean.
+PRs welcome, especially for macOS support. Run `just check` before
+submitting — lint, types and the coverage gate must all pass clean.
 
 ### Adding a new package
 

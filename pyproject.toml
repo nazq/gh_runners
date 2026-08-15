@@ -12,11 +12,11 @@ classifiers = [
     "Environment :: Console",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
-    "Operating System :: Microsoft :: Windows",
     "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Software Development :: Build Tools",
 ]
 dependencies = ["typer>=0.15"]
@@ -36,6 +36,34 @@ build-backend = "hatchling.build"
 dev = [
     "mypy>=1.19.1",
     "ruff>=0.15.1",
+    "pytest>=8.3",
+    "pytest-cov>=6.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--strict-markers --strict-config"
+markers = [
+    "no_platform_stub: do not force is_linux/is_windows (for platform-detection tests)",
+    "posix_only: exercises functionality that exists only on Linux/macOS",
+]
+
+[tool.coverage.run]
+source = ["gh_runners"]
+branch = true
+
+[tool.coverage.report]
+# The bar is 95%. Everything excluded below is unreachable in a test
+# process by construction, not merely inconvenient to reach.
+fail_under = 95
+show_missing = true
+# Deliberately short. Platform branches are NOT excluded: the test suite
+# stubs is_windows/is_linux, so both halves are reachable from any host, and
+# excluding them would hide the Windows paths from the 95% gate entirely.
+exclude_also = [
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "@overload",
 ]
 
 [tool.semantic_release]

@@ -1,0 +1,2 @@
+FROM docker.io/library/alpine:3
+RUN echo probe > /probe.txt

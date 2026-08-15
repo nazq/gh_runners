@@ -1,7 +1,7 @@
 # gh-runners development tasks
 
-# Run all checks (lint + typecheck)
-check: lint typecheck
+# Run all checks (lint + typecheck + tests with coverage gate)
+check: lint typecheck test
 
 # Lint with ruff
 lint:
@@ -16,6 +16,19 @@ fix:
 # Strict type checking
 typecheck:
     uv run mypy --strict gh_runners/
+
+# Run the test suite with the coverage gate (fail_under = 95)
+test:
+    uv run pytest --cov --cov-report=term-missing
+
+# Run the tests without the coverage gate — faster inner loop
+test-fast:
+    uv run pytest -q --no-cov
+
+# Coverage as a browsable HTML report
+coverage:
+    uv run pytest --cov --cov-report=html
+    @echo "open htmlcov/index.html"
 
 # Run the CLI
 run *args:

@@ -11,13 +11,15 @@ so each package can define whatever keys it needs (version, crates, flags, etc.)
 from __future__ import annotations
 
 import os
+import shutil
 import tarfile
+import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from collections.abc import Callable
 from typing import Any, Protocol
 
-from gh_runners.platform import detect_arch, run_cmd
+from gh_runners.platform import detect_arch, is_windows, run_cmd
 
 
 class InstallFn(Protocol):
@@ -75,7 +77,32 @@ def cargo_home(tc_dir: Path) -> Path:
 
 
 def node_home(tc_dir: Path) -> Path:
+    """Stable path to the primary version — a symlink into fnm's tree.
+
+    pnpm and the runners' PATH both need one directory that does not move
+    when another version is installed; fnm's own layout is versioned all
+    the way down.
+    """
     return tc_dir / "node"
+
+
+def fnm_dir(tc_dir: Path) -> Path:
+    """FNM_DIR: where fnm keeps its versions."""
+    return tc_dir / "fnm"
+
+
+def fnm_bin(tc_dir: Path) -> Path:
+    return fnm_dir(tc_dir) / "bin" / "fnm"
+
+
+def node_version_dir(tc_dir: Path, version: str) -> Path:
+    """fnm lays versions down as node-versions/vX.Y.Z/installation."""
+    v = version if version.startswith("v") else f"v{version}"
+    return fnm_dir(tc_dir) / "node-versions" / v
+
+
+def node_version_bin(tc_dir: Path, version: str) -> Path:
+    return node_version_dir(tc_dir, version) / "installation" / "bin" / "node"
 
 
 def go_home(tc_dir: Path) -> Path:
@@ -84,6 +111,20 @@ def go_home(tc_dir: Path) -> Path:
 
 def bun_home(tc_dir: Path) -> Path:
     return tc_dir / "bun"
+
+
+def python_home(tc_dir: Path) -> Path:
+    """Where uv installs interpreters — shared, like RUSTUP_HOME."""
+    return tc_dir / "python"
+
+
+def python_bin(tc_dir: Path) -> Path:
+    """Where uv links the `python3.X` executables.
+
+    Interpreters themselves live in versioned directories, so this is the
+    one stable path a runner's PATH can point at.
+    """
+    return tc_dir / "python" / "bin"
 
 
 def _rust_env(tc_dir: Path) -> dict[str, str]:
@@ -102,23 +143,37 @@ def _rust_env(tc_dir: Path) -> dict[str, str]:
 
 def _install_rust(tc_dir: Path, arch: str, cfg: dict[str, Any]) -> None:
     version: str = cfg.get("version", "1.86.0")
+    # Extra toolchains to install alongside the default, e.g. a version some
+    # repos pin via rust-toolchain.toml. Pre-installing them keeps the first
+    # CI job that needs one from paying the download — and, more importantly,
+    # stops several concurrent jobs racing to install into the shared
+    # RUSTUP_HOME (the same failure mode the pnpm preinstall exists to avoid).
+    extra: list[str] = list(cfg.get("extra_versions", []))
+    # Components every toolchain gets. rust-toolchain.toml can request these
+    # per-repo, but rustup then fetches them on first use — inside a CI job,
+    # concurrently, into shared state. Declaring them here makes the install
+    # deterministic. llvm-tools-preview in particular is needed by
+    # cargo-llvm-cov, which several repos use for coverage.
+    components: list[str] = list(cfg.get("components", []))
     rh = rustup_home(tc_dir)
     ch = cargo_home(tc_dir)
     env = _rust_env(tc_dir)
 
+    def _install_toolchain(rustup: str, ver: str, *, default: bool) -> None:
+        args = [rustup, "toolchain", "install", ver]
+        for comp in components:
+            args += ["-c", comp]
+        run_cmd(args, check=False, env=env)
+        if default:
+            run_cmd([rustup, "default", ver], check=False, env=env)
+
     rustup_bin = ch / "bin" / "rustup"
     if rustup_bin.exists():
         print(f"  rust: updating to {version}...")
-        run_cmd(
-            [str(rustup_bin), "toolchain", "install", version],
-            check=False,
-            env=env,
-        )
-        run_cmd(
-            [str(rustup_bin), "default", version],
-            check=False,
-            env=env,
-        )
+        _install_toolchain(str(rustup_bin), version, default=True)
+        for ver in extra:
+            print(f"  rust: installing extra toolchain {ver}...")
+            _install_toolchain(str(rustup_bin), ver, default=False)
     else:
         print(f"  rust: installing {version}...")
         rh.mkdir(parents=True, exist_ok=True)
@@ -149,6 +204,20 @@ def _install_rust(tc_dir: Path, arch: str, cfg: dict[str, Any]) -> None:
         )
         (tc_dir / "rustup-init.sh").unlink(missing_ok=True)
 
+        # rustup-init only laid down the default toolchain; add the declared
+        # components and any extra versions now.
+        rustup_bin = ch / "bin" / "rustup"
+        if rustup_bin.exists():
+            if components:
+                run_cmd(
+                    [str(rustup_bin), "component", "add", *components],
+                    check=False,
+                    env=env,
+                )
+            for ver in extra:
+                print(f"  rust: installing extra toolchain {ver}...")
+                _install_toolchain(str(rustup_bin), ver, default=False)
+
     # Install extra targets if specified (e.g. targets = "aarch64-unknown-linux-gnu")
     targets: str = cfg.get("targets", "")
     if targets.strip():
@@ -161,41 +230,120 @@ def _install_rust(tc_dir: Path, arch: str, cfg: dict[str, Any]) -> None:
 
 
 def _install_node(tc_dir: Path, arch: str, cfg: dict[str, Any]) -> None:
-    version: str = cfg.get("version", "22.14.0")
-    nh = node_home(tc_dir)
-    node_bin = nh / "bin" / "node"
+    """Install Node versions with fnm, side by side.
 
-    if node_bin.exists():
-        result = run_cmd([str(node_bin), "--version"], capture=True, check=False)
-        current = result.stdout.strip().lstrip("v")
-        if current == version:
-            print(f"  node: {version} already installed")
-            return
-        print(f"  node: upgrading {current} -> {version}...")
+    The previous installer kept exactly one version and ``rmtree``d the
+    whole node home to change it, so a repo pinning Node 20 could not
+    coexist with one pinning 22 — the second install destroyed the first.
 
-    node_arch = {"x64": "x64", "arm64": "arm64", "arm": "armv7l"}.get(arch, "x64")
-    tarball = f"node-v{version}-linux-{node_arch}.tar.xz"
-    url = f"https://nodejs.org/dist/v{version}/{tarball}"
+    fnm keeps each version in its own immutable directory and needs no
+    shell hook to use one: the interpreter is reachable by absolute path,
+    which is what makes this safe for a shared tree that twenty runners
+    read concurrently and none may write. Verified against fnm 1.39.0 with
+    the tree chmod'ed read-only.
+    """
+    version: str = str(cfg.get("version", "22.14.0"))
+    # Versions repos pin via .nvmrc or package.json engines. Pre-installed
+    # so a job starts warm rather than downloading mid-run, concurrently,
+    # into shared state.
+    extra: list[str] = [str(v) for v in cfg.get("extra_versions", [])]
 
-    print(f"  node: downloading {version} ({node_arch})...")
-    tarball_path = tc_dir / tarball
-    run_cmd(["curl", "-sSL", "-o", str(tarball_path), url])
+    fd = fnm_dir(tc_dir)
+    fd.mkdir(parents=True, exist_ok=True)
+    env = {**os.environ, "FNM_DIR": str(fd)}
 
-    if nh.exists():
-        import shutil
+    fnm = _ensure_fnm(tc_dir, arch, env)
+    if fnm is None:
+        return
 
-        shutil.rmtree(nh)
-    nh.mkdir(parents=True)
+    for v in [version, *extra]:
+        primary = v == version
+        label = "node" if primary else f"node {v}"
+        if node_version_bin(tc_dir, v).exists():
+            print(f"  {label}: {v} already installed")
+        else:
+            print(f"  {label}: installing {v}...")
+            result = run_cmd(
+                [str(fnm), "install", v], env=env, capture=True, check=False
+            )
+            if result.returncode != 0:
+                # One unavailable version must not cost the rest of the
+                # toolchain, but silence here fails later, inside a job.
+                print(f"  {label}: FAILED to install {v}")
+                continue
 
-    with tarfile.open(tarball_path, "r:xz") as tf:
-        for member in tf.getmembers():
-            parts = member.name.split("/", 1)
-            if len(parts) > 1:
-                member.name = parts[1]
-                tf.extract(member, nh)
-
-    tarball_path.unlink(missing_ok=True)
+    # A stable path for the primary version. pnpm and the runners' PATH both
+    # need one directory that does not move when a version is added, and
+    # fnm's own layout is versioned all the way down.
+    _link_primary_node(tc_dir, version)
     print(f"  node: {version} ready")
+
+
+def _ensure_fnm(tc_dir: Path, arch: str, env: dict[str, str]) -> Path | None:
+    """The fnm binary inside the toolchain, downloading it if absent."""
+    fnm = fnm_bin(tc_dir)
+    if fnm.exists():
+        return fnm
+
+    # Release asset names, verified against the v1.39.0 release. Only the
+    # x64 build carries the platform in its name; the ARM ones are bare
+    # (`fnm-arm64.zip`), so deriving them uniformly gets a 404.
+    asset = {"x64": "fnm-linux", "arm64": "fnm-arm64", "arm": "fnm-arm32"}.get(
+        arch, "fnm-linux"
+    )
+    if is_windows():
+        asset = "fnm-windows"
+    url = f"https://github.com/Schniz/fnm/releases/latest/download/{asset}.zip"
+
+    print(f"  node: fetching fnm ({asset})...")
+    fnm.parent.mkdir(parents=True, exist_ok=True)
+    archive = tc_dir / "fnm.zip"
+    # --fail matters: without it curl writes the server's error page to the
+    # output file and exits 0, so a wrong URL reaches zipfile as a
+    # BadZipFile traceback instead of a message naming the download.
+    result = run_cmd(
+        ["curl", "-sSL", "--fail", "-o", str(archive), url],
+        check=False,
+        capture=True,
+    )
+    if result.returncode != 0:
+        print(f"  node: FAILED to download fnm from {url}")
+        archive.unlink(missing_ok=True)
+        return None
+
+    try:
+        with zipfile.ZipFile(archive) as zf:
+            zf.extractall(fnm.parent)
+    except zipfile.BadZipFile:
+        print(f"  node: fnm download from {url} was not a zip archive")
+        archive.unlink(missing_ok=True)
+        return None
+    archive.unlink(missing_ok=True)
+
+    # The archive holds a bare `fnm`; older ones nested it in a directory.
+    if not fnm.exists():
+        found = next((p for p in fnm.parent.rglob("fnm") if p.is_file()), None)
+        if found is None:
+            print("  node: fnm archive did not contain the expected binary")
+            return None
+        found.replace(fnm)
+    fnm.chmod(0o755)
+    return fnm
+
+
+def _link_primary_node(tc_dir: Path, version: str) -> None:
+    """Point ``node/bin`` at the primary version's bin directory."""
+    target = node_version_dir(tc_dir, version) / "installation"
+    link = node_home(tc_dir)
+    if not target.exists():
+        return
+    if link.is_symlink() or link.exists():
+        if link.is_symlink():
+            link.unlink()
+        elif link.is_dir():
+            shutil.rmtree(link)
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link.symlink_to(target, target_is_directory=True)
 
 
 def _install_cargo_tools(tc_dir: Path, arch: str, cfg: dict[str, Any]) -> None:
@@ -406,45 +554,53 @@ def pwsh_home(tc_dir: Path) -> Path:
 
 
 def _install_python(tc_dir: Path, arch: str, cfg: dict[str, Any]) -> None:
-    """Install Python via winget on Windows. On Linux, skips (host Python used)."""
-    import sys
+    """Install Python interpreters with uv, into the shared toolchain.
 
-    version: str = cfg.get("version", "3.12")
+    uv is the only supported source. It installs each version side by side
+    and works identically on Linux and Windows, which the previous split did
+    not: winget on Windows, and on Linux nothing at all — runners silently
+    used whatever interpreter the host happened to have, so a repo needing
+    3.11 got the host's 3.13 and failed at import rather than at setup.
 
-    if sys.platform != "win32":
-        print(
-            f"  python: skipping (Linux runners use host Python {sys.version.split()[0]})"
+    Versions land under the toolchain directory rather than the invoking
+    user's home, for the same reason RUSTUP_HOME does: every runner reads
+    the same tree, and nothing is written into it during a job.
+    """
+    version: str = str(cfg.get("version", "3.12"))
+    # Versions a repo may pin alongside the default. Same rationale as rust:
+    # a job that needs 3.11 should start warm rather than downloading it
+    # mid-run, concurrently, into shared state.
+    extra: list[str] = [str(v) for v in cfg.get("extra_versions", [])]
+
+    install_dir = python_home(tc_dir)
+    bin_dir = python_bin(tc_dir)
+    install_dir.mkdir(parents=True, exist_ok=True)
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    env = {
+        **os.environ,
+        "UV_PYTHON_INSTALL_DIR": str(install_dir),
+        # Interpreters live in versioned directories; this is the single
+        # stable path a runner's PATH can carry.
+        "UV_PYTHON_BIN_DIR": str(bin_dir),
+    }
+
+    for v in [version, *extra]:
+        primary = v == version
+        label = "python" if primary else f"python {v}"
+        result = run_cmd(
+            ["uv", "python", "install", v],
+            env=env,
+            capture=True,
+            check=False,
         )
-        return
-
-    # Check if already installed
-    result = run_cmd(["python", "--version"], capture=True, check=False)
-    if result.returncode == 0:
-        current = result.stdout.strip().replace("Python ", "")
-        if current.startswith(version):
-            print(f"  python: {current} already installed")
-            return
-        print(f"  python: {current} found, installing {version}...")
-    else:
-        print(f"  python: installing {version} via winget...")
-
-    # Derive the winget ID — Python.Python.3.XX
-    major_minor = version if "." in version else f"{version}.0"
-    winget_id = f"Python.Python.{major_minor}"
-
-    run_cmd(
-        [
-            "winget",
-            "install",
-            "--id",
-            winget_id,
-            "--accept-source-agreements",
-            "--accept-package-agreements",
-            "--silent",
-        ],
-        check=False,
-    )
-    print(f"  python: {version} ready")
+        if result.returncode != 0:
+            # Not fatal: one unavailable version must not abort the rest of
+            # the toolchain, but it must be visible — a silently missing
+            # interpreter fails later, inside a job, far from the cause.
+            print(f"  {label}: FAILED to install {v}")
+            print(f"    {result.stderr.strip().splitlines()[-1:] or ['(no output)']}")
+            continue
+        print(f"  {label}: {v} ready")
 
 
 # ---------------------------------------------------------------------------
@@ -522,7 +678,7 @@ PACKAGES: dict[str, Package] = {
     ),
     "node": Package(
         name="node",
-        description="Node.js standalone runtime + npm",
+        description="Node.js via fnm (side-by-side versions)",
         install_fn=_install_node,
         supported_archs={"x64", "arm64", "arm"},
         default_version="22.14.0",
@@ -614,7 +770,7 @@ PACKAGES: dict[str, Package] = {
     ),
     "python": Package(
         name="python",
-        description="Python runtime (Windows: winget, Linux: uses host Python)",
+        description="Python interpreters via uv (side-by-side versions)",
         install_fn=_install_python,
         supported_archs={"x64", "arm64", "arm"},
         default_version="3.12",

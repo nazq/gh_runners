@@ -270,13 +270,148 @@ def systemd_service_name(service_prefix: str, idx: int) -> str:
     return f"{service_prefix}@{idx}.service"
 
 
+# When runners get their own unprivileged accounts, `systemctl --user` run by
+# the operator targets the *operator's* manager, not the runner's. Routing
+# every systemd call through this helper means switching to a dedicated user
+# is one change here rather than eight scattered call sites.
+#
+# Both XDG_RUNTIME_DIR and DBUS_SESSION_BUS_ADDRESS are required: with only
+# the former, systemctl cannot reach the user's manager and fails in a way
+# that looks like the service is missing. (Probe 2's first run hit exactly
+# this — see docs/runner-isolation.md §3.)
+_RUNNER_USER_ENV_VAR = "GH_RUNNERS_USER"
+
+
+def runner_user() -> str | None:
+    """The dedicated account runners execute as, if configured.
+
+    ``None`` means the legacy model: runners run as the invoking user.
+    """
+    return os.environ.get(_RUNNER_USER_ENV_VAR) or None
+
+
+def systemctl_user(*args: str) -> subprocess.CompletedProcess[str]:
+    """Run `systemctl --user ...` against the runner's systemd manager."""
+    user = runner_user()
+    if user is None:
+        return run_cmd(["systemctl", "--user", *args])
+
+    # pwd is Unix-only; import lazily so this module still imports on Windows,
+    # where the dedicated-user model does not apply (native services instead).
+    import pwd
+
+    uid = pwd.getpwnam(user).pw_uid
+    return run_cmd(
+        [
+            "sudo",
+            "-u",
+            user,
+            "-H",
+            "env",
+            f"XDG_RUNTIME_DIR=/run/user/{uid}",
+            f"DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{uid}/bus",
+            "systemctl",
+            "--user",
+            *args,
+        ]
+    )
+
+
+def systemd_user_dir() -> Path:
+    """Directory holding the runner's systemd user units."""
+    user = runner_user()
+    if user is None:
+        return Path.home() / ".config" / "systemd" / "user"
+
+    import pwd  # Unix-only; see systemctl_user()
+
+    return Path(pwd.getpwnam(user).pw_dir) / ".config" / "systemd" / "user"
+
+
+def _user_unit_path(user: str, service_prefix: str) -> Path:
+    """Where ``user``'s systemd manager reads unit files from.
+
+    Resolved from the account's real home via getent rather than assumed:
+    the home is configurable and moves with runner_home_real.
+    """
+    from gh_runners import privilege as priv
+
+    home = priv.as_user(
+        user, ["sh", "-c", "echo $HOME"], check=False, capture=True
+    ).stdout.strip()
+    if not home:
+        home = f"/srv/gh-runners/{user}"
+    return Path(home) / ".config" / "systemd" / "user" / f"{service_prefix}@.service"
+
+
+def _unit_content(org_name: str, base_dir: Path) -> str:
+    """The template unit body, shared by both install paths."""
+    return f"""[Unit]
+Description=GitHub Actions Runner - {org_name} (%i)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory={base_dir}/runner-%i
+EnvironmentFile={base_dir}/runner-%i/.env
+ExecStart={base_dir}/runner-%i/run.sh
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target
+"""
+
+
+def _install_units_as(
+    user: str, service_prefix: str, org_name: str, base_dir: Path, count: int
+) -> None:
+    """Install the template into ``user``'s own systemd manager."""
+    from gh_runners import privilege as priv
+
+    unit = _user_unit_path(user, service_prefix)
+    # Written by the runner, not by root and chowned after: a root-owned
+    # unit file in a home the runner cannot modify is its own failure mode.
+    priv.write_as(user, unit, _unit_content(org_name, base_dir))
+    priv.systemctl_user(user, "daemon-reload")
+    for i in range(1, count + 1):
+        priv.systemctl_user(user, "enable", systemd_service_name(service_prefix, i))
+
+
+def _uninstall_units_as(user: str, service_prefix: str, count: int) -> None:
+    """Remove the template from ``user``'s systemd manager."""
+    from gh_runners import privilege as priv
+
+    for i in range(1, count + 1):
+        svc = systemd_service_name(service_prefix, i)
+        priv.systemctl_user(user, "stop", svc)
+        priv.systemctl_user(user, "disable", svc)
+
+    unit = _user_unit_path(user, service_prefix)
+    priv.as_user(user, ["rm", "-f", str(unit)], check=False)
+    priv.systemctl_user(user, "daemon-reload")
+
+
 def install_systemd_service(
     service_prefix: str,
     org_name: str,
     base_dir: Path,
     count: int,
+    runner_user: str | None = None,
 ) -> None:
-    """Generate and install a systemd user service template."""
+    """Generate and install a systemd user service template.
+
+    ``runner_user`` names whose systemd manager gets the units. Without it
+    they land in the operator's — ``Path.home()`` and a bare ``systemctl
+    --user`` are both *whoever ran the command*, not the account the
+    services describe. That produced a fleet which registered with GitHub
+    and then sat offline forever: the units existed, in a manager that does
+    not run the runners.
+    """
+    if runner_user:
+        _install_units_as(runner_user, service_prefix, org_name, base_dir, count)
+        return
+
     service_dir = Path.home() / ".config" / "systemd" / "user"
     service_dir.mkdir(parents=True, exist_ok=True)
 
@@ -320,24 +455,34 @@ WantedBy=default.target
         run_cmd(["loginctl", "enable-linger", user], check=False)
 
 
-def start_service(service_prefix: str, idx: int) -> None:
+def _systemctl(action: str, service_prefix: str, idx: int, user: str | None) -> None:
+    """`systemctl --user <action>` against the right user's manager.
+
+    Without ``user`` this targets the *invoking* user's systemd instance. That
+    was correct while runners ran as the operator; with dedicated accounts it
+    silently acts on the wrong manager and reports success having done
+    nothing.
+    """
+    if is_windows():
+        return
+    unit = systemd_service_name(service_prefix, idx)
+    if user is None:
+        run_cmd(["systemctl", "--user", action, unit], check=False)
+        return
+
+    from gh_runners.privilege import systemctl_user
+
+    systemctl_user(user, action, unit)
+
+
+def start_service(service_prefix: str, idx: int, user: str | None = None) -> None:
     """Start a runner service (Linux/macOS only — see win_start_service for Windows)."""
-    if is_windows():
-        return
-    run_cmd(
-        ["systemctl", "--user", "start", systemd_service_name(service_prefix, idx)],
-        check=False,
-    )
+    _systemctl("start", service_prefix, idx, user)
 
 
-def stop_service(service_prefix: str, idx: int) -> None:
+def stop_service(service_prefix: str, idx: int, user: str | None = None) -> None:
     """Stop a runner service (Linux/macOS only — see win_stop_service for Windows)."""
-    if is_windows():
-        return
-    run_cmd(
-        ["systemctl", "--user", "stop", systemd_service_name(service_prefix, idx)],
-        check=False,
-    )
+    _systemctl("stop", service_prefix, idx, user)
 
 
 def service_status(
@@ -363,8 +508,18 @@ def service_status(
     return "unknown"
 
 
-def uninstall_systemd_service(service_prefix: str, count: int) -> None:
-    """Disable and remove a systemd user service template."""
+def uninstall_systemd_service(
+    service_prefix: str, count: int, runner_user: str | None = None
+) -> None:
+    """Disable and remove a systemd user service template.
+
+    Must target the same manager :func:`install_systemd_service` wrote to,
+    or it removes nothing and reports success.
+    """
+    if runner_user:
+        _uninstall_units_as(runner_user, service_prefix, count)
+        return
+
     for i in range(1, count + 1):
         svc = systemd_service_name(service_prefix, i)
         run_cmd(["systemctl", "--user", "stop", svc], check=False)

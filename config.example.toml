@@ -16,22 +16,61 @@ job_wait_seconds = 3600
 # Seconds between job completion checks during wait
 poll_interval = 10
 
+[paths]
+# Where runner homes physically live, bind-mounted to /srv/gh-runners.
+#
+# Set this when the volume you want the homes on sits somewhere a runner
+# user cannot reach — typically inside an operator's home, which is
+# drwxr-x--- and so blocks traversal no matter how the directories below
+# are owned. Loosening those permissions would undo the isolation; a bind
+# mount is resolved by the kernel at mount time, so the restrictive parent
+# is never consulted. `setup` adds an /etc/fstab entry so it survives boot.
+#
+# Leave unset (or omit the whole section) to create homes directly under
+# /srv/gh-runners on whatever volume backs it.
+# runner_home_real = "/home/you/dev/gh-runner-homes"
+
 # ── Linux-only: Shared Toolchain ─────────────────────────────────
 # On Linux, runners use an isolated toolchain so they don't conflict
 # with your personal dev tools. Windows users install tools globally.
 #
 # Each package gets its own sub-table for version + any extra config.
 # Available packages: rust, node, cargo-tools, go, pnpm, bun, pwsh, python
-# Run `gh-runners list-packages` to see all available packages.
+# Run `gh-runners list-packages` to see every package, the version this host
+# would install, and which ones are enabled.
+#
+# rust, node and python accept `extra_versions`: additional versions kept
+# alongside the default, for repos that pin one. Each is installed into its
+# own directory, so a repo pinning an older version and one on the default
+# can build concurrently on the same host.
 
 [toolchain]
 packages = ["rust", "node", "cargo-tools"]
 
 [toolchain.rust]
-version = "1.88.0"
+version = "1.97"
+# Components every toolchain gets. A repo can request these per-repo via
+# rust-toolchain.toml, but rustup then fetches them on first use — inside a
+# CI job, concurrently, into the shared RUSTUP_HOME. Declaring them here
+# makes the install deterministic. llvm-tools-preview is needed by
+# cargo-llvm-cov.
+components = ["rustfmt", "clippy", "rust-analyzer", "rust-docs", "llvm-tools-preview"]
+# Extra toolchains installed alongside the default, for repos pinning a
+# different version via rust-toolchain.toml. Pre-installing avoids the
+# first job paying a ~200MB download, and avoids concurrent jobs racing to
+# install into the shared RUSTUP_HOME.
+# e.g. extra_versions = ["1.92.0"]
+extra_versions = []
 
 [toolchain.node]
+# Installed by fnm, which keeps each version in its own directory and needs
+# no shell hook — the runners execute via systemd with a fixed PATH, so
+# anything requiring `eval "$(fnm env)"` cannot work here.
 version = "22.14.0"
+# Versions repos pin via .nvmrc, .node-version or package.json engines.
+# Installed alongside the default so a job needing one starts warm rather
+# than downloading mid-run, concurrently, into the shared toolchain.
+extra_versions = []
 
 [toolchain.cargo-tools]
 # Space-separated cargo crates to install
@@ -50,8 +89,13 @@ crates = "cargo-llvm-cov just tauri-cli"
 # [toolchain.pwsh]
 # version = "7.5.4"
 #
+# Python interpreters are installed by uv, side by side, on Linux and
+# Windows alike. Without this package the runners use whatever interpreter
+# the host happens to have, so a repo pinning 3.11 silently gets the host's
+# version and fails at import rather than at setup.
 # [toolchain.python]
-# version = "3.12"
+# version = "3.13"
+# extra_versions = ["3.11", "3.12", "3.14"]
 
 # ── Organizations ────────────────────────────────────────────────
 # Define one [[org]] block per GitHub organization.
@@ -63,6 +107,16 @@ runner_group = "Default"
 runner_count = 4
 name_prefix = "runner"
 service_prefix = "gh-runner-myorg"
+
+# Linux: the dedicated unprivileged account these runners execute as.
+# `setup` creates it, gives it its own home and subuid range, and enables
+# rootless podman for it. Strongly recommended — without it the runners run
+# as whoever invoked the tool, so any workflow that can run on them can read
+# that user's SSH keys and cloud credentials, and reach the Docker socket if
+# they are in the `docker` group. See docs/runner-isolation.md.
+#
+# Leave unset only if every workflow able to run here is one you trust.
+runner_user = "ghr-myorg"
 
 # Extra labels beyond the automatic: self-hosted, Linux/Windows, X64
 extra_labels = ""
