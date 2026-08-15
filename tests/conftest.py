@@ -108,6 +108,7 @@ def fake_run(monkeypatch: pytest.MonkeyPatch) -> FakeRun:
         "gh_runners.packages",
         "gh_runners.toolchain",
         "gh_runners.check_host",
+        "gh_runners.check_toolchain",
         "gh_runners.cli",
         "gh_runners.provision",
         "gh_runners.reconcile",
@@ -286,6 +287,7 @@ def _linux(
         "gh_runners.provision",
         "gh_runners.reconcile",
         "gh_runners.check_host",
+        "gh_runners.check_toolchain",
     ):
         monkeypatch.setattr(f"{mod}.is_windows", lambda: False, raising=False)
         monkeypatch.setattr(f"{mod}.is_linux", lambda: True, raising=False)
