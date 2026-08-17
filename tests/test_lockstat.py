@@ -71,6 +71,14 @@ class TestReport:
     def test_healthy_overlap_reports_holders(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """Hermetic: collect() stats the guard path before consulting
+        _fd_holders, and CI hosts have no /run/lock/host-build.* — patch
+        the stat too or the holder lookup is never reached."""
+
+        class FakeStat:
+            st_ino = 67
+
+        monkeypatch.setattr(lockstat.os, "stat", lambda p: FakeStat())
         monkeypatch.setattr(lockstat, "_held", lambda p: "slot" in p)
         monkeypatch.setattr(lockstat, "_fd_holders", lambda i: ["123 (cargo)"])
         monkeypatch.setattr(
