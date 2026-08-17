@@ -136,10 +136,16 @@ class TestMatchesDesired:
 class TestTmpfilesContent:
     def test_exact_content(self) -> None:
         """0666 is load-bearing: flock(1) opens with write intent, so 0644
-        breaks every non-owner's lock acquisition with Permission denied.
-        The x line exempts the lock from /tmp aging."""
+        breaks every non-owner's acquisition with Permission denied. The
+        guards live in non-sticky /run/lock (fs.protected_regular does not
+        apply there); the /tmp names are root-owned compat symlinks for
+        merged justfiles."""
         assert slices.tmpfiles_content("nazq") == (
-            "f /tmp/host-build.lock 0666 nazq nazq -\nx /tmp/host-build.lock\n"
+            "f /run/lock/host-build.lock 0666 nazq nazq -\n"
+            "f /run/lock/host-build.slot0 0666 nazq nazq -\n"
+            "f /run/lock/host-build.slot1 0666 nazq nazq -\n"
+            "L+ /tmp/host-build.lock - - - - /run/lock/host-build.lock\n"
+            "L+ /tmp/chimera-build.lock - - - - /run/lock/host-build.lock\n"
         )
 
     def test_default_owner_prefers_sudo_user(
@@ -258,7 +264,8 @@ class TestSliceApply:
             in result.stdout
         )
         assert f"sudo tee {tmpfiles_path}" in result.stdout
-        assert "f /tmp/host-build.lock 0666" in result.stdout
+        assert "f /run/lock/host-build.lock 0666" in result.stdout
+        assert "f /run/lock/host-build.slot0 0666" in result.stdout
         assert f"sudo systemd-tmpfiles --create {tmpfiles_path}" in result.stdout
 
     def test_without_root_or_sudo_prints_instead_of_prompting(

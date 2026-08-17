@@ -1505,6 +1505,35 @@ def fpq_run(
     raise typer.Exit(exit_code)
 
 
+@fpq_app.command("cancel")
+def fpq_cancel(
+    job_class: Annotated[
+        str,
+        typer.Option("--class", help="Admission class of the job."),
+    ],
+    job_id: Annotated[int, typer.Argument(help="Job id (from fpq status).")],
+) -> None:
+    """Cancel a job: dequeue it, or kill it if already running."""
+    from gh_runners import fpq as fq
+
+    _require_linux("fpq", "drives per-user task-spooler daemons")
+    try:
+        action = fq.cancel(job_class, job_id)
+    except fq.FpqError as e:
+        print(f"ERROR: {e}")
+        raise typer.Exit(2) from None
+    print(f"fpq: job {job_id} ({job_class}): {action}")
+
+
+@app.command("lockstat")
+def lockstat_cmd() -> None:
+    """Show build-guard state: holders, waiters, compile census."""
+    from gh_runners import lockstat
+
+    _require_linux("lockstat", "reads /proc and flocks the guard files")
+    print(lockstat.report())
+
+
 @fpq_app.command("status")
 def fpq_status() -> None:
     """Show every class's queue: running/queued jobs, ages, exit codes."""

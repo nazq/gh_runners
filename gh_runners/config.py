@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 import tomllib
 from dataclasses import dataclass, field
@@ -112,9 +113,15 @@ class Config:
 
 
 def _find_config() -> Path:
-    """Find config.toml, searching CWD then the package directory."""
+    """Find config.toml: $GH_RUNNERS_CONFIG, then ~/.gh-runners/, then the
+    package checkout. Never the CWD — running from inside a repo that has
+    its own unrelated config.toml (fp-mcp-app does) must not silently load
+    that file as ours.
+    """
+    env = os.environ.get("GH_RUNNERS_CONFIG")
     candidates = [
-        Path.cwd() / "config.toml",
+        *([Path(env)] if env else []),
+        Path.home() / ".gh-runners" / "config.toml",
         Path(__file__).parent.parent / "config.toml",
     ]
     for p in candidates:

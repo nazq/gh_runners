@@ -451,3 +451,52 @@ class TestNoBuildLockInvolvement:
         runner.invoke(cli.app, ["fpq", "run", "--class", "compile", "--", "true"])
         assert not fake_run.ran("flock")
         assert not fake_run.ran("host-build.lock")
+
+
+class TestCancel:
+    def test_removes_queued_job(self, monkeypatch):
+        calls = []
+
+        def fake_run(cmd, **kw):
+            calls.append(cmd)
+            return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+        monkeypatch.setattr(fpq, "run_cmd", fake_run)
+        assert fpq.cancel("compile", 7) == "removed from queue"
+        assert calls[0][:2] == ["tsp", "-r"]
+
+    def test_kills_running_job_when_dequeue_fails(self, monkeypatch):
+        seq = iter([1, 0])
+
+        def fake_run(cmd, **kw):
+            return type(
+                "R", (), {"returncode": next(seq), "stdout": "", "stderr": ""}
+            )()
+
+        monkeypatch.setattr(fpq, "run_cmd", fake_run)
+        assert fpq.cancel("compile", 7) == "killed running job"
+
+    def test_raises_when_both_fail(self, monkeypatch):
+        def fake_run(cmd, **kw):
+            return type(
+                "R", (), {"returncode": 1, "stdout": "", "stderr": "no such job"}
+            )()
+
+        monkeypatch.setattr(fpq, "run_cmd", fake_run)
+        with pytest.raises(fpq.FpqError):
+            fpq.cancel("compile", 7)
+
+
+class TestSccacheHazard:
+    def test_refuses_sccache_wrapper(self, monkeypatch):
+        """sccache deadlocks with any fifo jobserver on real compiles
+        (probed 2026-08-17, plain mkfifo included) — fpq must refuse to
+        combine them rather than wedge the queue."""
+        monkeypatch.setenv("RUSTC_WRAPPER", "/usr/local/bin/sccache")
+        with pytest.raises(fpq.FpqError):
+            fpq.wrapped_command(["cargo", "check"])
+
+    def test_allows_without_wrapper(self, monkeypatch):
+        monkeypatch.delenv("RUSTC_WRAPPER", raising=False)
+        cmd = fpq.wrapped_command(["cargo", "check"], no_scope=True)
+        assert cmd[:2] == ["env", f"MAKEFLAGS={fpq.GUILD_MAKEFLAGS}"]
