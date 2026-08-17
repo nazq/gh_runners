@@ -2,6 +2,38 @@
 
 <!-- version list -->
 
+## v2.2.1 (2026-08-17)
+
+### Bug Fixes
+
+- Hermetic config-discovery test + lint (ambiguous name, format)
+  ([#17](https://github.com/nazq/gh_runners/pull/17),
+  [`0314c7b`](https://github.com/nazq/gh_runners/commit/0314c7b6dcb2a4ae1ee35d0866ad184eb227eba7))
+
+- **fpq**: Config never from CWD, cancel command, sccache hazard guard; add lockstat
+  ([#17](https://github.com/nazq/gh_runners/pull/17),
+  [`0314c7b`](https://github.com/nazq/gh_runners/commit/0314c7b6dcb2a4ae1ee35d0866ad184eb227eba7))
+
+- **fpq**: Config resolution, cancel, sccache guard; add lockstat
+  ([#17](https://github.com/nazq/gh_runners/pull/17),
+  [`0314c7b`](https://github.com/nazq/gh_runners/commit/0314c7b6dcb2a4ae1ee35d0866ad184eb227eba7))
+
+### Code Style
+
+- Format lockstat tests ([#17](https://github.com/nazq/gh_runners/pull/17),
+  [`0314c7b`](https://github.com/nazq/gh_runners/commit/0314c7b6dcb2a4ae1ee35d0866ad184eb227eba7))
+
+### Testing
+
+- Cover lockstat (held/free truth, fd-holder scan, stall signature)
+  ([#17](https://github.com/nazq/gh_runners/pull/17),
+  [`0314c7b`](https://github.com/nazq/gh_runners/commit/0314c7b6dcb2a4ae1ee35d0866ad184eb227eba7))
+
+- Make lockstat holder test hermetic — CI has no guard files
+  ([#17](https://github.com/nazq/gh_runners/pull/17),
+  [`0314c7b`](https://github.com/nazq/gh_runners/commit/0314c7b6dcb2a4ae1ee35d0866ad184eb227eba7))
+
+
 ## v2.2.0 (2026-08-15)
 
 
