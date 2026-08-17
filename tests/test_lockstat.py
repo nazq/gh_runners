@@ -57,9 +57,7 @@ class TestFdHolders:
 
 
 class TestReport:
-    def test_stall_signature_called_out(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_stall_signature_called_out(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(lockstat, "_held", lambda p: True)
         monkeypatch.setattr(lockstat, "_fd_holders", lambda i: [])
         monkeypatch.setattr(lockstat, "_pgrep_count", lambda n: 0)
