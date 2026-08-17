@@ -346,12 +346,14 @@ def cancel(job_class: str, job_id: int) -> str:
     fails, so fall back to -k (kills the running job's process group).
     Returns which action took effect, for the CLI to report.
     """
-    r = run_cmd([TSP, "-r", str(job_id)], check=False, capture=True,
-                env=tsp_env(job_class))
+    r = run_cmd(
+        [TSP, "-r", str(job_id)], check=False, capture=True, env=tsp_env(job_class)
+    )
     if r.returncode == 0:
         return "removed from queue"
-    r = run_cmd([TSP, "-k", str(job_id)], check=False, capture=True,
-                env=tsp_env(job_class))
+    r = run_cmd(
+        [TSP, "-k", str(job_id)], check=False, capture=True, env=tsp_env(job_class)
+    )
     if r.returncode == 0:
         return "killed running job"
     raise FpqError(

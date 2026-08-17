@@ -120,7 +120,7 @@ def _find_config() -> Path:
     """
     env = os.environ.get("GH_RUNNERS_CONFIG")
     candidates = [
-        *( [Path(env)] if env else [] ),
+        *([Path(env)] if env else []),
         Path.home() / ".gh-runners" / "config.toml",
         Path(__file__).parent.parent / "config.toml",
     ]

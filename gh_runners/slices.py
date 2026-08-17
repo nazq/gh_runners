@@ -194,5 +194,5 @@ def tmpfiles_content(owner: str) -> str:
     """
     lines = [f"f {LOCK_PATH} 0666 {owner} {owner} -"]
     lines += [f"f {p} 0666 {owner} {owner} -" for p in SLOT_PATHS]
-    lines += [f"L+ {l} - - - - {LOCK_PATH}" for l in COMPAT_LINKS]
+    lines += [f"L+ {link} - - - - {LOCK_PATH}" for link in COMPAT_LINKS]
     return "\n".join(lines) + "\n"
