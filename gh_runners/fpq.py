@@ -130,6 +130,12 @@ def wrapped_command(command: list[str], *, no_scope: bool = False) -> list[str]:
     job's CPU weight and --collect reaps the scope even on failure;
     --no-scope exists for environments with no user manager (CI, tests).
     """
+    if "sccache" in os.environ.get("RUSTC_WRAPPER", ""):
+        raise FpqError(
+            "RUSTC_WRAPPER=sccache with a fifo jobserver deadlocks real "
+            "compiles (upstream sccache; probed 2026-08-17). Unset "
+            "RUSTC_WRAPPER to queue this job, or run it outside fpq."
+        )
     prefix = ["env", f"MAKEFLAGS={GUILD_MAKEFLAGS}"]
     if no_scope:
         return prefix + list(command)
@@ -331,3 +337,23 @@ def journal_end(row_id: int, *, exit_code: int, run_seconds: float | None) -> No
             " WHERE id = ?",
             (time.time(), run_seconds, exit_code, row_id),
         )
+
+
+def cancel(job_class: str, job_id: int) -> str:
+    """Remove a queued job, or kill it if already running.
+
+    tsp -r removes a job that has not started; for a running job it
+    fails, so fall back to -k (kills the running job's process group).
+    Returns which action took effect, for the CLI to report.
+    """
+    r = run_cmd([TSP, "-r", str(job_id)], check=False, capture=True,
+                env=tsp_env(job_class))
+    if r.returncode == 0:
+        return "removed from queue"
+    r = run_cmd([TSP, "-k", str(job_id)], check=False, capture=True,
+                env=tsp_env(job_class))
+    if r.returncode == 0:
+        return "killed running job"
+    raise FpqError(
+        f"could not cancel job {job_id} in '{job_class}': {r.stderr.strip()}"
+    )

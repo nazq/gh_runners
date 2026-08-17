@@ -96,10 +96,19 @@ class TestNaming:
 
 
 class TestDiscovery:
-    def test_prefers_cwd(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_ignores_cwd(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A repo's own config.toml must never be read as ours (fp-mcp-app
+        has one; loading it silently produced a nonsense config)."""
         (tmp_path / "config.toml").write_text("")
         monkeypatch.chdir(tmp_path)
-        assert _find_config() == tmp_path / "config.toml"
+        monkeypatch.delenv("GH_RUNNERS_CONFIG", raising=False)
+        assert _find_config() != tmp_path / "config.toml"
+
+    def test_env_var_wins(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        cfg = tmp_path / "elsewhere.toml"
+        cfg.write_text("")
+        monkeypatch.setenv("GH_RUNNERS_CONFIG", str(cfg))
+        assert _find_config() == cfg
 
     def test_exits_with_guidance_when_missing(
         self,

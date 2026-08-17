@@ -39,7 +39,11 @@ from gh_runners.platform import run_cmd
 CGROUP_USER_ROOT = Path("/sys/fs/cgroup/user.slice")
 
 TMPFILES_PATH = Path("/etc/tmpfiles.d/host-build-lock.conf")
-LOCK_PATH = "/tmp/host-build.lock"
+LOCK_PATH = "/run/lock/host-build.lock"
+SLOT_PATHS = ("/run/lock/host-build.slot0", "/run/lock/host-build.slot1")
+# Legacy names baked into merged justfiles; root-owned symlinks in /tmp are
+# followable by everyone under fs.protected_symlinks.
+COMPAT_LINKS = ("/tmp/host-build.lock", "/tmp/chimera-build.lock")
 
 # Runner accounts share this prefix by convention (ghr-peg, ghr-nazq, ...).
 RUNNER_USER_PATTERN = re.compile(r"^ghr")
@@ -188,4 +192,7 @@ def tmpfiles_content(owner: str) -> str:
     line exempts the path from /tmp aging so systemd-tmpfiles never
     deletes a lock out from under a long build holding it.
     """
-    return f"f {LOCK_PATH} 0666 {owner} {owner} -\nx {LOCK_PATH}\n"
+    lines = [f"f {LOCK_PATH} 0666 {owner} {owner} -"]
+    lines += [f"f {p} 0666 {owner} {owner} -" for p in SLOT_PATHS]
+    lines += [f"L+ {l} - - - - {LOCK_PATH}" for l in COMPAT_LINKS]
+    return "\n".join(lines) + "\n"
