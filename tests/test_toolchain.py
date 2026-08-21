@@ -236,6 +236,37 @@ class TestWriteRunnerEnv:
         tc.write_runner_env(legacy, tmp_path)
         assert (rdir / ".env").exists()
 
+    def test_sccache_size_is_set_and_shared(
+        self,
+        org: Any,
+        tmp_path: Path,
+        fake_uid: None,
+    ) -> None:
+        """SCCACHE_CACHE_SIZE is set, and identical for every runner.
+
+        sccache's cache is shared across runners on purpose, so the size
+        belongs in the common block rather than _RUNNER_STATE — a per-runner
+        value there would read as ten separate ceilings on one directory.
+        The default is 20G, which chimera alone exceeds; leaving it unset
+        pinned the cache at 20G/20G and evicted as fast as it filled.
+        """
+        envs = [
+            dict(
+                line.split("=", 1)
+                for line in tc.runner_env(org, i, tmp_path).splitlines()
+                if "=" in line
+            )
+            for i in range(1, org.runner_count + 1)
+        ]
+
+        assert all("SCCACHE_CACHE_SIZE" in e for e in envs)
+        sizes = {e["SCCACHE_CACHE_SIZE"] for e in envs}
+        assert len(sizes) == 1, f"size must not vary per runner, got {sizes}"
+
+        # A per-runner path would mean the value was derived from rdir.
+        size = sizes.pop()
+        assert not any(str(org.runner_dir(i)) in size for i in (1, 2))
+
     def test_setup_writes_exactly_what_reconcile_expects(
         self,
         org: Any,
