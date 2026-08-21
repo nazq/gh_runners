@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v2.3.0 (2026-08-21)
+
+### Features
+
+- Raise SCCACHE_CACHE_SIZE to 100G in the runner env
+  ([#18](https://github.com/nazq/gh_runners/pull/18),
+  [`972bd22`](https://github.com/nazq/gh_runners/commit/972bd228ad4022b5a069c8d25e51f2a1d8b395d3))
+
+
 ## v2.2.1 (2026-08-17)
 
 ### Bug Fixes
