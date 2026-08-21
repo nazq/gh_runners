@@ -212,6 +212,12 @@ def _write_cloud_config(rdir: Path) -> tuple[Path, Path]:
 # shared — that is the point of having a shared toolchain.
 #
 # (dir-name, env-vars) — one directory may back several vars.
+# Shared across every runner. Sized against the free space on the cache
+# volume rather than the number of runners: sccache evicts by total bytes,
+# so a bigger ceiling helps whichever build is running, not one of them.
+_SCCACHE_CACHE_SIZE = "100G"
+
+
 _RUNNER_STATE: tuple[tuple[str, tuple[str, ...]], ...] = (
     (".cargo", ("CARGO_HOME",)),
     (".npm", ("NPM_CONFIG_CACHE",)),
@@ -305,6 +311,18 @@ def runner_env(org: OrgConfig, idx: int, tc_dir: Path) -> str:
         f"TEMP={rdir}/_tmp",
         f"CLOUDSDK_CONFIG={gcloud_dir}",
         f"DOCKER_CONFIG={docker_dir}",
+        # sccache's compilation cache is deliberately SHARED across runners
+        # — cross-runner reuse is the whole point — so it is set here rather
+        # than in _RUNNER_STATE, which exists to give each runner its own
+        # copy of a writable cache.
+        #
+        # sccache defaults to 20G. A Rust workspace the size of chimera
+        # (DuckDB, Arrow, sqlx, tonic) exceeds that on its own, and each
+        # profile — dev, release, and the instrumented build coverage runs —
+        # is a separate set of artifacts. The cache sat pinned at 20G/20G
+        # and evicted as fast as it filled, giving a 49.9% hit rate: 1327
+        # hits against 1331 misses, which is a coin flip rather than a cache.
+        f"SCCACHE_CACHE_SIZE={_SCCACHE_CACHE_SIZE}",
     ]
     if org.isolated:
         # Rootless podman's socket lives in the runner's own XDG runtime
