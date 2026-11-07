@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v2.4.0 (2026-11-07)
+
+### Features
+
+- **config**: Repository-level runners under a personal account
+  ([#19](https://github.com/nazq/gh_runners/pull/19),
+  [`43fc568`](https://github.com/nazq/gh_runners/commit/43fc56828e64a9cbd1bb6f9e9ee8b449df792b26))
+
+
 ## v2.3.0 (2026-08-21)
 
 ### Features
