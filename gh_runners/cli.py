@@ -335,11 +335,24 @@ def _extract_runner_as(user: str, archive_path: Path, dest: Path) -> None:
     as_user(user, as_user_cmd, check=False)
 
 
+def _worker_pattern(rdir: Path) -> str:
+    """The `pgrep -f` pattern for a job running in this runner's directory.
+
+    Anchored on the full directory, not on ``runner-N/bin``: every block has
+    a runner-1, so the old pattern lit up "RUNNING JOB" on five runners when
+    one of them had a job. The bracket keeps the pattern from matching a
+    shell that happens to carry it on its own command line (see
+    reconcile._runner_is_busy for the version of this that bit).
+    """
+    return f"{rdir}/bin.*Runner[.]Worker"
+
+
 def _get_active_runners(cfg: Config, org_name: str | None) -> list[str]:
     active: list[str] = []
     for org in _select_orgs(cfg, org_name):
         for i in range(1, org.runner_count + 1):
             name = org.runner_name(i)
+            rdir = org.runner_dir(i)
             if is_windows():
                 result = run_powershell(
                     f'Get-Process | Where-Object {{ $_.Path -like "*{name}*Runner.Worker*" }} | Measure-Object | Select-Object -ExpandProperty Count',
@@ -351,7 +364,7 @@ def _get_active_runners(cfg: Config, org_name: str | None) -> list[str]:
                     active.append(name)
             else:
                 result = run_cmd(
-                    ["pgrep", "-f", f"runner-{i}/bin.*Runner\\.Worker"],
+                    ["pgrep", "-f", _worker_pattern(rdir)],
                     capture=True,
                     check=False,
                 )
@@ -1068,7 +1081,7 @@ def status(org: Org = None) -> None:
                 has_job = bool(cnt and int(cnt) > 0)
             else:
                 result = run_cmd(
-                    ["pgrep", "-f", f"runner-{i}/bin.*Runner\\.Worker"],
+                    ["pgrep", "-f", _worker_pattern(rdir)],
                     capture=True,
                     check=False,
                 )

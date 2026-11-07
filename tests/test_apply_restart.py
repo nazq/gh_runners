@@ -49,6 +49,32 @@ class TestApplyRestartsAfterEnvChange:
         rec.apply(report, cfg)
         assert not fake_run.ran("restart gh-runner-test@1.service")
 
+    def test_busy_probe_cannot_match_its_own_wrapper(
+        self, fake_run: FakeRun, cfg: Any, fake_uid: None
+    ) -> None:
+        """as_user runs pgrep via `sh -c "cd / && pgrep -f <pattern>"`, so the
+        pattern is on that shell's command line. `pgrep -f` skips only
+        itself, not its parent shell: with the plain `Runner.Worker` the
+        probe matched the wrapper, every one of 22 idle runners read as
+        busy, and a fleet-wide .env repair restarted nothing. Verified on
+        the host through the real wrapper; this pins the regex property."""
+        import re
+
+        fake_run.when("pgrep", returncode=1)
+        rec._runner_is_busy(cfg.orgs[0], 1)
+        (argv,) = fake_run.matching("pgrep")
+        # The last argument is the `sh -c` body; the pattern is its last word.
+        body = argv[-1]
+        pattern = body.split("pgrep -f ", 1)[1].strip().strip("'\"")
+        assert re.search(pattern, " ".join(argv)) is None, (
+            f"probe pattern {pattern!r} matches its own command line"
+        )
+        # And it still matches a real worker for this runner.
+        rdir = cfg.orgs[0].runner_dir(1)
+        assert re.search(
+            pattern, f"{rdir}/bin/Runner.Worker spawnclientprocess {rdir}/_work"
+        )
+
     def test_no_restart_when_nothing_touched_env(
         self, fake_run: FakeRun, cfg: Any, fake_uid: None
     ) -> None:
