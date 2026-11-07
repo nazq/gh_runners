@@ -664,9 +664,17 @@ def _runner_is_busy(org: OrgConfig, idx: int) -> bool:
     if not org.runner_user:
         return False
     rdir = org.runner_dir(idx)
+    # as_user runs this through `sh -c "cd / && pgrep -f <pattern>"`, so the
+    # pattern appears verbatim on that shell's own command line. `pgrep -f`
+    # matches every process but itself, and the wrapper is not itself —
+    # with `Runner.Worker` the probe matched its own `sh`, every runner read
+    # as busy, and a fleet-wide .env repair restarted nothing while
+    # reporting "repaired 22". The bracket breaks the self-match: the regex
+    # `Runner[.]Worker` requires a literal dot, and the literal text
+    # `Runner[.]Worker` on the wrapper's command line does not have one.
     r = priv.as_user(
         org.runner_user,
-        ["pgrep", "-f", f"Runner.Worker.*{rdir}"],
+        ["pgrep", "-f", f"Runner[.]Worker.*{rdir}"],
         check=False,
         capture=True,
     )

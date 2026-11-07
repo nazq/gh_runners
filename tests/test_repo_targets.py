@@ -541,3 +541,24 @@ runner_user = "ghr-nazq"
         assert result.exit_code == 0, result.output
         row = next(ln for ln in result.output.splitlines() if ln.startswith("foo-1"))
         assert row.split()[-2] == "?"
+
+
+class TestWorkerPattern:
+    """Every block has a runner-1, so job detection must anchor on the
+    block's directory. Found when host-core-1 was the only busy runner and
+    `status` showed RUNNING JOB on all five runner-1s."""
+
+    def test_anchors_on_the_full_runner_dir(self) -> None:
+        import re
+
+        a = Path("/srv/gh-runners/ghr-nazq/home-k8s/runner-1")
+        b = Path("/srv/gh-runners/ghr-nazq/host-core/runner-1")
+        worker_b = f"{b}/bin/Runner.Worker spawnclientprocess {b}/_work"
+        assert re.search(cli._worker_pattern(b), worker_b)
+        assert re.search(cli._worker_pattern(a), worker_b) is None
+
+    def test_does_not_match_its_own_text(self) -> None:
+        import re
+
+        p = cli._worker_pattern(Path("/x/runner-1"))
+        assert re.search(p, f"sh -c pgrep -f {p}") is None
