@@ -129,6 +129,33 @@ class TestPerRunnerEnv:
         )
         assert "runner-1" in line
 
+    def test_isolated_jobs_get_a_real_shell(self, env_text: str) -> None:
+        """The account's login shell is nologin and the user manager exports
+        no SHELL, so tmux and `$SHELL -lc` fell through to nologin and died.
+        Verified on the host: `tmux new-session -d` under ghr-nazq exits at
+        once with SHELL unset or nologin, and lives with SHELL=/bin/bash."""
+        assert "SHELL=/bin/bash" in env_text.splitlines()
+
+    def test_non_isolated_runners_keep_the_operators_shell(
+        self, tmp_path: Path
+    ) -> None:
+        """Running as the operator, the passwd shell is a real one; nothing
+        to override, and overriding would be wrong for a zsh/fish user."""
+        from gh_runners import reconcile
+        from gh_runners.config import OrgConfig
+
+        plain = OrgConfig(
+            name="Plain",
+            url="https://github.com/Plain",
+            runner_group="Default",
+            runner_count=1,
+            name_prefix="p",
+            service_prefix="p",
+            base_dir=str(tmp_path / "plain"),
+        )
+        env = reconcile.desired_env(plain, 1, tmp_path)
+        assert not any(ln.startswith("SHELL=") for ln in env.splitlines())
+
 
 class TestWriteRunnerEnv:
     """`setup` runs under sudo, so nothing here may be written by root.

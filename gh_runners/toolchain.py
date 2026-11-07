@@ -330,6 +330,13 @@ def runner_env(org: OrgConfig, idx: int, tc_dir: Path) -> str:
         lines.append(
             f"DOCKER_HOST=unix:///run/user/{priv._uid(org.runner_user)}/podman/podman.sock"
         )
+        # The account's login shell is /usr/sbin/nologin — correct for an
+        # account nobody logs into, wrong as the $SHELL of the jobs it runs.
+        # The user's systemd manager exports no SHELL, so anything that
+        # consults it falls through to the passwd entry: tmux's server
+        # exited on startup, and any `$SHELL -lc` in a test harness would
+        # do the same. Jobs get a real shell; the login shell stays nologin.
+        lines.append("SHELL=/bin/bash")
     return "\n".join(lines) + "\n"
 
 
