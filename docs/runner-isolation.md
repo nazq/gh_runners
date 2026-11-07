@@ -62,6 +62,13 @@ Three changes, each addressing a distinct failure mode.
 `ghr-<org>`, with its own home, its own subuid/subgid range, and membership
 of **no** privileged group — in particular not `docker`.
 
+Its login shell is `/usr/sbin/nologin`. That is right for the account and
+wrong for the jobs it runs: the user's systemd manager exports no `SHELL`,
+so anything consulting it falls through to the passwd entry — tmux's server
+exited on startup, and a `$SHELL -lc` in a test harness would do the same.
+`write_runner_env` therefore sets `SHELL=/bin/bash` in every isolated
+runner's `.env`; the login shell stays `nologin`.
+
 Runners run under that user's own systemd manager (`systemctl --user`),
 with `loginctl enable-linger` so the manager and its `/run/user/<uid>`
 exist at boot without a login. See [§5.1](#51-per-user-systemd-managers-not-system-units-with-user)
