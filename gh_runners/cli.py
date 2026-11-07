@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -18,8 +19,17 @@ import typer
 
 from gh_runners import escalation as esc
 from gh_runners.check_host import cmd_check_host
-from gh_runners.config import Config, OrgConfig, SliceConfig, load_config
-from gh_runners.reconcile import gh_org_from_url, github_runner_state
+from gh_runners.config import (
+    RUNNER_HOME_ROOT,
+    Config,
+    GitHubTarget,
+    OrgConfig,
+    SliceConfig,
+    find_config,
+    load_config,
+    parse_github_url,
+)
+from gh_runners.reconcile import github_runner_state
 from gh_runners.platform import (
     config_script,
     default_labels,
@@ -62,7 +72,10 @@ fpq_app = typer.Typer(
 app.add_typer(fpq_app, name="fpq")
 
 # Common option types
-Org = Annotated[Optional[str], typer.Option("--org", help="Target a specific org.")]
+Org = Annotated[
+    Optional[str],
+    typer.Option("--org", help="Target one config block by its name."),
+]
 Token = Annotated[
     Optional[str],
     typer.Option(
@@ -83,14 +96,22 @@ def _select_orgs(cfg: Config, org_name: str | None) -> list[OrgConfig]:
     for org in cfg.orgs:
         if org.name == org_name:
             return [org]
-    print(f"ERROR: Organization '{org_name}' not found in config.toml")
+    print(f"ERROR: No [[org]] block named '{org_name}' in config.toml")
     print(f"Available: {', '.join(o.name for o in cfg.orgs)}")
     raise typer.Exit(1)
 
 
+def _mint_command(org_url: str) -> str | None:
+    """The `gh api` call that mints a registration token for this target."""
+    target = parse_github_url(org_url)
+    if target is None:
+        return None
+    return f"gh api -X POST {target.runners_api}/registration-token --jq .token"
+
+
 def _fetch_token_via_gh(org_url: str) -> str | None:
-    gh_org = gh_org_from_url(org_url)
-    if gh_org is None:
+    target = parse_github_url(org_url)
+    if target is None:
         return None
     result = run_cmd(
         [
@@ -98,7 +119,7 @@ def _fetch_token_via_gh(org_url: str) -> str | None:
             "api",
             "-X",
             "POST",
-            f"orgs/{gh_org}/actions/runners/registration-token",
+            f"{target.runners_api}/registration-token",
             "--jq",
             ".token",
         ],
@@ -132,9 +153,8 @@ def _resolve_token(token: str | None, org: OrgConfig) -> str:
         print("  Got registration token via gh CLI.")
         return fetched
 
-    gh_org = gh_org_from_url(org.url) or org.name
-    mint = (
-        f"gh api -X POST orgs/{gh_org}/actions/runners/registration-token --jq .token"
+    mint = _mint_command(org.url) or (
+        f"gh api -X POST orgs/{org.name}/actions/runners/registration-token --jq .token"
     )
     print(f"\n  ERROR: No registration token for {org.name}.")
 
@@ -644,7 +664,6 @@ def setup(
     # registration have nowhere to go. All idempotent.
     if is_linux() and any(o.isolated for o in orgs):
         from gh_runners.provision import (
-            RUNNER_HOME_ROOT,
             ensure_bind_mount,
             ensure_podman,
             ensure_shared_roots,
@@ -968,11 +987,16 @@ def status(org: Org = None) -> None:
         #
         # Non-isolated orgs run under the operator's own systemd manager, so
         # the local answer is authoritative and the network call is pure cost.
-        gh_state = github_runner_state(o) if o.isolated and not is_windows() else {}
+        gh_state = github_runner_state(o) if o.isolated and not is_windows() else None
 
+        # Repo blocks name runners after the repository, which is as long as
+        # the repository's name; size the column to the widest one.
+        width = max(
+            24, max(len(o.runner_name(i)) for i in range(1, o.runner_count + 1))
+        )
         print(f"\n{o.name}")
-        print(f"{'Runner':<24} {'Local':<12} {'GitHub':<12} {'Active Job'}")
-        print("-" * 66)
+        print(f"{'Runner':<{width}} {'Local':<12} {'GitHub':<12} {'Active Job'}")
+        print("-" * (width + 42))
 
         for i in range(1, o.runner_count + 1):
             name = o.runner_name(i)
@@ -1031,7 +1055,7 @@ def status(org: Org = None) -> None:
 
             # "-" means we asked and GitHub does not know this runner at all,
             # which is different from "?" (we could not ask).
-            gh_status = gh_state.get(name, "-" if gh_state else "?")
+            gh_status = "?" if gh_state is None else gh_state.get(name, "-")
 
             has_job = False
             if is_windows():
@@ -1061,7 +1085,7 @@ def status(org: Org = None) -> None:
             note = ""
             if local_status == "active" and gh_status in ("offline", "-"):
                 note = "  <-- LOST REGISTRATION"
-            print(f"{name:<24} {local_status:<12} {gh_status:<12} {job_str}{note}")
+            print(f"{name:<{width}} {local_status:<12} {gh_status:<12} {job_str}{note}")
 
 
 @app.command()
@@ -1195,13 +1219,12 @@ def remove(
             "will show as offline on GitHub:"
         )
         print(f"  {', '.join(orphaned)}")
-        print("  Remove them at the org's Actions > Runners settings page.")
+        print("  Remove them under Settings > Actions > Runners on GitHub.")
 
 
 def _purge_hosts(cfg: Config, org_name: str | None) -> None:
     """Remove the accounts, homes and mount that `setup` provisioned."""
     from gh_runners.provision import (
-        RUNNER_HOME_ROOT,
         RemovalError,
         remove_bind_mount,
         remove_user,
@@ -1209,7 +1232,22 @@ def _purge_hosts(cfg: Config, org_name: str | None) -> None:
 
     print("\nPurging host provisioning...")
     failed: list[str] = []
-    for o in _select_orgs(cfg, org_name):
+    selected = _select_orgs(cfg, org_name)
+    # Several blocks may run under one account — the intended layout for a
+    # personal account's repos. Deleting that account because *one* of them
+    # is being purged would take every sibling's home with it.
+    still_needed = {o.runner_user for o in cfg.orgs if o.isolated and o not in selected}
+    for o in selected:
+        if o.isolated and o.runner_user in still_needed:
+            others = [
+                x.name
+                for x in cfg.orgs
+                if x.runner_user == o.runner_user and x not in selected
+            ]
+            print(
+                f"  {o.runner_user}: account kept — still used by {', '.join(others)}"
+            )
+            continue
         try:
             if remove_user(o):
                 print(f"  {o.runner_user}: account, home and subuid entries removed")
@@ -1235,6 +1273,118 @@ def priv_user_exists(user: str) -> bool:
     from gh_runners.privilege import user_exists
 
     return user_exists(user)
+
+
+def _repo_target(repo: str) -> GitHubTarget | None:
+    """``owner/repo`` or a full GitHub URL, as a repo target. None otherwise."""
+    if "://" in repo:
+        url = repo
+    else:
+        # A slug is exactly two segments. Anything longer is a host-less URL
+        # from somewhere else, not a GitHub repo with a creative owner.
+        parts = [p for p in repo.strip("/").split("/") if p]
+        if len(parts) != 2:
+            return None
+        url = f"https://github.com/{parts[0]}/{parts[1]}"
+    target = parse_github_url(url)
+    if target is None or not target.is_repo:
+        return None
+    return target
+
+
+def _repo_block(target: GitHubTarget, user: str, count: int, labels: str) -> str:
+    """The ``[[org]]`` table for one repository, as TOML text.
+
+    Only what differs from the defaults is written, so the file stays
+    readable as the list grows. json.dumps produces valid TOML basic strings.
+    """
+    assert target.repo is not None
+    lines = [
+        f"# ── {target.owner}/{target.repo} ──",
+        "[[org]]",
+        f"name = {json.dumps(target.repo)}",
+        f"url = {json.dumps(f'https://github.com/{target.owner}/{target.repo}')}",
+        f"runner_user = {json.dumps(user)}",
+    ]
+    if count != 1:
+        lines.append(f"runner_count = {count}")
+    if labels:
+        lines.append(f"extra_labels = {json.dumps(labels)}")
+    return "\n".join(lines) + "\n"
+
+
+@app.command("add-repo")
+def add_repo(
+    repo: Annotated[
+        str, typer.Argument(help="OWNER/REPO, or the repository's GitHub URL.")
+    ],
+    user: Annotated[
+        Optional[str],
+        typer.Option(
+            "--user",
+            help="Runner account. Defaults to ghr-<owner>, shared by every "
+            "repo block for that owner.",
+        ),
+    ] = None,
+    count: Annotated[
+        int, typer.Option("--count", min=1, help="Runners for this repo.")
+    ] = 1,
+    labels: Annotated[
+        str, typer.Option("--labels", help="Extra comma-separated labels.")
+    ] = "",
+    do_setup: Annotated[
+        bool, typer.Option("--setup", help="Run `setup` for the new block now.")
+    ] = False,
+) -> None:
+    """Add a config block for one repository, then optionally set it up.
+
+    Repositories under a personal account have no runner groups and no
+    org-wide runners, so each one that needs CI gets its own block. The
+    blocks share one runner account per owner by default: a second account
+    per repo would cost a subuid range and a podman store each and isolate
+    nothing, since every repo is the same person's code.
+    """
+    target = _repo_target(repo)
+    if target is None:
+        print(f"ERROR: {repo!r} is not OWNER/REPO or a GitHub repository URL.")
+        raise typer.Exit(1)
+    assert target.repo is not None
+    runner_user = user or f"ghr-{target.owner.lower()}"
+
+    path = find_config()
+    before = path.read_text()
+    block = _repo_block(target, runner_user, count, labels)
+    joiner = "" if before.endswith("\n") else "\n"
+    path.write_text(f"{before}{joiner}\n{block}")
+
+    # load_config validates the whole file and exits on a problem — a name
+    # already taken, say. Never leave a config.toml behind that the next
+    # command will refuse to read.
+    try:
+        load_config(path)
+    except SystemExit:
+        path.write_text(before)
+        print(f"ERROR: block rejected; {path} restored unchanged.")
+        raise typer.Exit(1) from None
+
+    print(f"Added to {path}:\n")
+    print(block)
+    if not do_setup:
+        print(f"Next: gh-runners setup --org {target.repo}")
+        return
+
+    # Errors below go to stderr unbuffered; without the flush they land
+    # before the block above and read as though adding it was what failed.
+    sys.stdout.flush()
+    try:
+        setup(token=None, org=target.repo, check=False, toolchain=False)
+    except Exception:
+        print(
+            f"\nThe block is kept in {path}. Once the problem is fixed:\n"
+            f"  gh-runners setup --org {target.repo}",
+            file=sys.stderr,
+        )
+        raise
 
 
 @app.command()

@@ -89,11 +89,11 @@ class TestGithubRunnerState:
     def test_empty_on_api_failure(self, fake_run: FakeRun, org: Any) -> None:
         """A failed lookup must not be mistaken for 'no runners'."""
         fake_run.when("actions/runners", returncode=1)
-        assert reconcile.github_runner_state(org) == {}
+        assert reconcile.github_runner_state(org) is None
 
     def test_empty_on_malformed_json(self, fake_run: FakeRun, org: Any) -> None:
         fake_run.when("actions/runners", stdout="not json at all")
-        assert reconcile.github_runner_state(org) == {}
+        assert reconcile.github_runner_state(org) is None
 
 
 class TestStatus:

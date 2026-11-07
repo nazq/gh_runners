@@ -105,27 +105,26 @@ def have_root_now() -> bool:
     This is a *hint*, and deliberately one-directional: True means go ahead,
     False means "unknown", never "will definitely prompt".
 
-    ``sudo -n -v`` asks whether the credential timestamp is valid. That is
-    not the question we care about, and on this host the two answers differ:
-    with a per-command ``NOPASSWD`` rule and no cached timestamp, ``-n -v``
-    exits 1 while the actual privileged command runs fine. Treating that as
-    "must prompt" would ask for a password nobody needed.
+    The probe is ``sudo -n true``: the cheapest real privileged command.
+    Earlier versions asked ``sudo -n -v``, which is the wrong question —
+    ``-v`` means "authenticate the user", and sudo-rs (0.2.8, the sudo on
+    the target host) refuses it non-interactively even under a ``NOPASSWD``
+    rule that lets every actual command through. The result was a tool that
+    demanded a password nobody needed on exactly the hosts that had been set
+    up so it would not. ``sudo -n -l CMD`` is no better: it reports what the
+    *policy* permits, and exits 0 for target users whose real ``sudo -n -u``
+    exits 1.
 
-    ``sudo -n -l CMD`` is the usual suggested fix, and it is worse here: it
-    reports what the *policy* permits, so on this host it exits 0 for a
-    target user whose real ``sudo -n -u`` still exits 1. A false positive
-    skips the prompt and lets the operation fail instead.
-
-    So neither probe is authoritative. The reliable signal is the exit code
-    of the real operation, which the callers in :mod:`gh_runners.privilege`
-    already surface — this only avoids prompting when we can cheaply prove
-    a prompt is unnecessary.
+    So neither alternative is authoritative, and the reliable signal is the
+    exit code of the real operation, which the callers in
+    :mod:`gh_runners.privilege` already surface — this only avoids prompting
+    when we can cheaply prove a prompt is unnecessary.
     """
     if is_windows():
         return False
     if is_root():
         return True
-    return run_cmd(["sudo", "-n", "-v"], check=False, capture=True).returncode == 0
+    return run_cmd(["sudo", "-n", "true"], check=False, capture=True).returncode == 0
 
 
 def can_prompt() -> bool:

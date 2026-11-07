@@ -30,7 +30,7 @@ from enum import Enum
 from pathlib import Path
 
 from gh_runners import privilege as priv
-from gh_runners.config import Config, OrgConfig
+from gh_runners.config import Config, OrgConfig, parse_github_url
 from gh_runners import toolchain
 from gh_runners.platform import run_cmd
 
@@ -431,35 +431,35 @@ def check_services(org: OrgConfig, report: Report) -> None:
 
 
 def gh_org_from_url(url: str) -> str | None:
-    """Extract the org slug from a GitHub org URL."""
-    parts = url.rstrip("/").split("/")
-    if len(parts) >= 4 and "github.com" in parts[2]:
-        return parts[3]
-    return None
+    """The owner segment of a GitHub org or repo URL, or None."""
+    target = parse_github_url(url)
+    return target.owner if target else None
 
 
-def github_runner_state(org: OrgConfig) -> dict[str, str]:
+def github_runner_state(org: OrgConfig) -> dict[str, str] | None:
     """Map runner name -> "online" / "offline" / "busy", per GitHub.
 
     GitHub is authoritative for whether a runner can be dispatched work: a
     local unit can be perfectly healthy while its session is gone. Returns
-    {} if the gh CLI is unavailable or the call fails, so callers can tell
-    "could not ask" apart from "asked, and this runner is unknown".
+    None if the gh CLI is unavailable or the call fails, and {} when GitHub
+    answered with no runners at all — a fresh repository block looks exactly
+    like that until `setup` registers its first runner, and must not be
+    reported as "could not ask".
     """
-    gh_org = gh_org_from_url(org.url)
-    if not gh_org:
-        return {}
+    target = org.target
+    if target is None:
+        return None
     result = run_cmd(
-        ["gh", "api", f"orgs/{gh_org}/actions/runners", "--paginate"],
+        ["gh", "api", target.runners_api, "--paginate"],
         capture=True,
         check=False,
     )
     if result.returncode != 0 or not result.stdout.strip():
-        return {}
+        return None
     try:
         payload = json.loads(result.stdout)
     except json.JSONDecodeError:
-        return {}
+        return None
     runners = payload.get("runners", []) if isinstance(payload, dict) else []
     return {
         r["name"]: ("busy" if r.get("busy") else r.get("status", "?"))
@@ -489,7 +489,7 @@ def check_registration(org: OrgConfig, report: Report) -> None:
         return
 
     state = github_runner_state(org)
-    if not state:
+    if state is None:
         report.add(
             f"{org.name}/registration",
             State.INFO,

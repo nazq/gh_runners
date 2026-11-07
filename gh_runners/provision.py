@@ -18,13 +18,13 @@ import time
 from pathlib import Path
 
 from gh_runners import privilege as priv
-from gh_runners.config import OrgConfig
+from gh_runners.config import RUNNER_HOME_ROOT, OrgConfig
 
 # Shared parents. Root-owned by design: each runner user owns only its own
 # subdirectory. A parent owned by one of its tenants blocks the others —
 # which happened once, when a failed run left the root owned by ghr-nazq and
-# ghr-peg could not create its home inside it.
-RUNNER_HOME_ROOT = Path("/srv/gh-runners")
+# ghr-peg could not create its home inside it. RUNNER_HOME_ROOT is defined
+# with the config so it can default each block's base_dir.
 TOOLCHAIN_ROOT = Path("/opt/gh-runners")
 
 # Named rather than inlined so tests can point it at a fixture file. Reading

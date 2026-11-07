@@ -129,6 +129,7 @@ All commands support `--org <name>` to target a specific organization.
 | `gh-runners clean` | Clean `_work` directories (stop runners first) |
 | `gh-runners logs <org> <N>` | Show last 50 log lines for runner N |
 | `gh-runners remove` | Unregister from GitHub, remove services |
+| `gh-runners add-repo <owner/repo>` | Append an `[[org]]` block for one repository; `--setup` registers it immediately |
 | `gh-runners slice show` | Show cgroup CPU/memory weights on the runner user slices (Linux) |
 | `gh-runners slice apply` | Apply `[slices]` weights and the build-lock tmpfiles entry (Linux) |
 | `gh-runners slice apply --print-only` | Print the commands for the operator instead of running them |
@@ -187,11 +188,46 @@ extra_labels = ""
 
 ### Key settings
 
-- **runner_count**: Parallel runners per org. Match to your CPU cores / build needs.
-- **name_prefix**: Shows in GitHub UI as `prefix-1`, `prefix-2`, etc.
-- **service_prefix**: Systemd service name prefix (Linux) or Windows Service name.
-- **base_dir**: Where runner binaries live. Defaults to `~/.gh-runners/<org_name>`.
+Only `name` and `url` are required. Everything else has a default.
+
+- **runner_count**: Parallel runners for this block. Defaults to 1. Match to your CPU cores / build needs.
+- **name_prefix**: Shows in GitHub UI as `prefix-1`, `prefix-2`, etc. Defaults to `name`.
+- **service_prefix**: Systemd service name prefix (Linux) or Windows Service name. Defaults to `name`.
+- **base_dir**: Where runner binaries live. Defaults to `/srv/gh-runners/<runner_user>/<name>` when `runner_user` is set, otherwise `~/.gh-runners/<name>`.
 - **extra_labels**: Additional labels beyond the automatic `self-hosted,Linux/Windows,X64`.
+
+Blocks are validated against each other on load: two blocks may not share a
+`name`, a `base_dir`, a `service_prefix` under the same `runner_user`, or a
+`name_prefix` on the same GitHub target. Sharing a `runner_user` is fine.
+
+### Repository runners (personal accounts)
+
+A personal account has no organization, no runner groups, and no shared
+runner pool: each repository that needs CI registers its own runners. An
+`[[org]]` block handles this unchanged — give it a repository URL and the
+tool switches to the `repos/{owner}/{repo}` runner API. Repo-level calls
+need only the `repo` scope on your `gh` token, not `admin:org`.
+
+```toml
+[[org]]
+name = "foo"
+url = "https://github.com/nazq/foo"
+runner_user = "ghr-nazq"
+```
+
+`add-repo` writes that block for you and validates the result:
+
+```bash
+gh-runners add-repo nazq/foo            # append the block, print the next step
+gh-runners add-repo nazq/foo --setup    # and register the runner now
+gh-runners add-repo nazq/foo --count 2 --labels gpu --user ghr-nazq-ci
+```
+
+Every repo block for an owner shares one runner account, `ghr-<owner>` by
+default. An account per repo would cost a subuid range and a podman store
+each and isolate nothing, since every repo is the same person's code.
+`remove --purge --org foo` keeps the shared account while another block
+still uses it.
 
 ### Toolchain packages
 

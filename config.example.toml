@@ -133,8 +133,10 @@ crates = "cargo-llvm-cov just tauri-cli"
 # itest = 2
 # image = 1
 
-# ── Organizations ────────────────────────────────────────────────
-# Define one [[org]] block per GitHub organization.
+# ── Registration targets ─────────────────────────────────────────
+# One [[org]] block per GitHub organization — or per repository, for a
+# personal account (see the second block). Only `name` and `url` are
+# required; the rest default as noted.
 
 [[org]]
 name = "MyOrg"
@@ -157,6 +159,19 @@ runner_user = "ghr-myorg"
 # Extra labels beyond the automatic: self-hosted, Linux/Windows, X64
 extra_labels = ""
 
-# Base directory for runner installations
-# Defaults to ~/.gh-runners/<org_name> if omitted
-# base_dir = "~/.gh-runners/MyOrg"
+# Base directory for runner installations. Defaults to
+# /srv/gh-runners/<runner_user>/<name> when runner_user is set, otherwise
+# ~/.gh-runners/<name>.
+# base_dir = "/srv/gh-runners/ghr-myorg/MyOrg"
+
+# ── A repository under a personal account ───────────────────────
+# Personal accounts have no runner groups and no org-wide pool, so each
+# repo that needs CI gets its own block. runner_count, name_prefix,
+# service_prefix and base_dir take their defaults (1, "foo", "foo",
+# /srv/gh-runners/ghr-me/foo). Every repo block for one owner shares the
+# same runner_user. `gh-runners add-repo me/foo` writes this block for you.
+
+# [[org]]
+# name = "foo"
+# url = "https://github.com/me/foo"
+# runner_user = "ghr-me"

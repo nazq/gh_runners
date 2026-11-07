@@ -215,6 +215,17 @@ Concurrent runners still don't race on shared state: `write_runner_env`
 gives each runner its own `CARGO_HOME`, `CLOUDSDK_CONFIG`, `DOCKER_CONFIG`,
 npm/uv/pip/pnpm/go caches.
 
+The same reasoning extends to repositories under a personal account, which
+have no org to group them. Each repo is its own `[[org]]` block, and every
+block for one owner shares a single account, `ghr-<owner>` by default. The
+boundary being drawn is between *principals* — who can push a workflow that
+runs here — not between repositories: every repo under one owner is already
+the same person's code, able to run the same workflows under the same
+token scope, so an account per repo would cost a subuid range and a podman
+store each and separate nothing. Because an account can now outlive any
+one block, `remove --purge --org <name>` keeps it while another block
+still references it.
+
 ### 5.3 Let `useradd` allocate subuid/subgid
 
 The original plan was explicit allocation at `1000000 + (index * 65536)`,
