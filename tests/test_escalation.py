@@ -26,7 +26,7 @@ def _real_escalation(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 class TestHaveRootNow:
-    """Probed with `sudo -n -v`, never by checking euid.
+    """Probed with `sudo -n true`, never by checking euid.
 
     A passwordless rule, a recent authentication and actually being root
     should all proceed silently, and only the exit code separates those from
@@ -35,23 +35,23 @@ class TestHaveRootNow:
     """
 
     def test_true_when_sudo_succeeds(self, fake_run: FakeRun) -> None:
-        fake_run.when("sudo -n -v", returncode=0)
+        fake_run.when("sudo -n true", returncode=0)
         assert esc.have_root_now() is True
 
     def test_false_when_sudo_refuses(self, fake_run: FakeRun) -> None:
-        fake_run.when("sudo -n -v", returncode=1)
+        fake_run.when("sudo -n true", returncode=1)
         assert esc.have_root_now() is False
 
     def test_uses_the_non_interactive_probe(self, fake_run: FakeRun) -> None:
         """Without -n this probe would itself prompt, which is the hang it
         exists to prevent."""
         esc.have_root_now()
-        assert fake_run.ran("sudo -n -v")
+        assert fake_run.ran("sudo -n true")
 
 
 class TestEnsureRoot:
     def test_silent_when_root_is_already_available(self, fake_run: FakeRun) -> None:
-        fake_run.when("sudo -n -v", returncode=0)
+        fake_run.when("sudo -n true", returncode=0)
         esc.ensure_root("testing")
         assert not fake_run.ran("sudo -v\n")
 
@@ -158,20 +158,20 @@ class TestRootShortCircuit:
 
 
 class TestProbeIsOnlyAHint:
-    """`sudo -n -v` answers a different question than the one we ask.
+    """A refused probe means "unknown", never "must prompt".
 
-    It reports whether the credential *timestamp* is valid. With a
-    per-command NOPASSWD rule and no cached timestamp it exits 1 while the
-    real privileged command succeeds — verified against both sudo.ws 1.9.17
-    and sudo-rs 0.2.8 on the target host. Treating that as "must prompt"
-    asks for a password nobody needed, so False must mean "unknown".
+    The probe used to be `sudo -n -v`, which sudo-rs 0.2.8 refuses
+    non-interactively even under a live NOPASSWD rule — so `setup` demanded
+    a password on the one host configured not to need one. The probe is now
+    a real command, but the contract stands: a False here only withholds
+    the shortcut, and the real operation's exit code remains the authority.
     """
 
     def test_a_refused_probe_does_not_assert_a_prompt_is_needed(
         self, fake_run: FakeRun, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(esc, "is_root", lambda: False)
-        fake_run.when("sudo -n -v", returncode=1)
+        fake_run.when("sudo -n true", returncode=1)
         # The contract is only that we do not claim root is available; the
         # real operation's exit code remains the authority.
         assert esc.have_root_now() is False
@@ -188,5 +188,5 @@ class TestProbeIsOnlyAHint:
         ):
             esc.reset_cache()
             fake_run._rules.clear()
-            fake_run.when("sudo -n -v", returncode=0, stderr=message)
+            fake_run.when("sudo -n true", returncode=0, stderr=message)
             assert esc.have_root_now() is True, "exit code must win over text"

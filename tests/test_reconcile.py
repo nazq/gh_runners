@@ -444,7 +444,7 @@ class TestCheckRegistration:
     ) -> None:
         """A self-hosted GHES org has no api.github.com to ask."""
         org.url = "https://git.example.com/TestOrg"
-        assert rec.github_runner_state(org) == {}
+        assert rec.github_runner_state(org) is None
 
     def test_skips_non_isolated_orgs(
         self, fake_run: FakeRun, org: Any, report: Report

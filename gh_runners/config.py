@@ -9,10 +9,61 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+# Where isolated runner accounts have their homes. Defined here rather than
+# in provision.py because the config layer needs it to default ``base_dir``
+# and provision imports config, not the other way round.
+RUNNER_HOME_ROOT = Path("/srv/gh-runners")
+
+
+@dataclass(frozen=True)
+class GitHubTarget:
+    """What a runner registers against: an org, or one repository.
+
+    GitHub exposes the same runner API twice, under ``orgs/{owner}`` and
+    ``repos/{owner}/{repo}``. Everything else — ``config.sh --url``, labels,
+    the settings page — takes the plain URL and does not care. This is the
+    one place that does.
+    """
+
+    owner: str
+    repo: str | None = None
+
+    @property
+    def runners_api(self) -> str:
+        """The ``gh api`` path that lists this target's runners."""
+        if self.repo:
+            return f"repos/{self.owner}/{self.repo}/actions/runners"
+        return f"orgs/{self.owner}/actions/runners"
+
+    @property
+    def is_repo(self) -> bool:
+        return self.repo is not None
+
+
+def parse_github_url(url: str) -> GitHubTarget | None:
+    """``https://github.com/Owner`` or ``https://github.com/Owner/repo``.
+
+    Returns None for anything that is not a github.com URL with at least an
+    owner segment. A trailing ``.git`` on the repo is tolerated because that
+    is what people paste.
+    """
+    parts = url.rstrip("/").split("/")
+    if len(parts) < 4 or "github.com" not in parts[2] or not parts[3]:
+        return None
+    repo: str | None = None
+    if len(parts) >= 5 and parts[4]:
+        repo = parts[4].removesuffix(".git")
+    return GitHubTarget(owner=parts[3], repo=repo)
+
 
 @dataclass
 class OrgConfig:
-    """Configuration for a single GitHub organization's runners."""
+    """Configuration for one registration target's runners.
+
+    Historically an organization, hence the name and the ``[[org]]`` table;
+    a repository under a personal account is configured the same way with
+    a repo URL. See :class:`GitHubTarget`.
+    """
 
     name: str
     url: str
@@ -38,6 +89,10 @@ class OrgConfig:
     def isolated(self) -> bool:
         """True when these runners have their own account."""
         return bool(self.runner_user)
+
+    @property
+    def target(self) -> GitHubTarget | None:
+        return parse_github_url(self.url)
 
 
 @dataclass
@@ -133,6 +188,98 @@ def _find_config() -> Path:
     sys.exit(1)
 
 
+def _parse_org(org_raw: dict[str, Any]) -> OrgConfig:
+    """One ``[[org]]`` table, with the defaults that make a repo block short.
+
+    ``name`` and ``url`` are the only required keys. Prefixes default to the
+    name, the count to one, and ``base_dir`` to a directory under the runner
+    account's home — or, for a non-isolated block, under the operator's.
+    """
+    org_name = str(org_raw["name"])
+    runner_user = str(org_raw.get("runner_user", ""))
+    if "base_dir" in org_raw:
+        base_dir = str(Path(str(org_raw["base_dir"])).expanduser())
+    elif runner_user:
+        base_dir = str(RUNNER_HOME_ROOT / runner_user / org_name)
+    else:
+        base_dir = str((Path("~/.gh-runners") / org_name).expanduser())
+
+    return OrgConfig(
+        name=org_name,
+        url=str(org_raw["url"]),
+        runner_group=str(org_raw.get("runner_group", "Default")),
+        runner_count=int(org_raw.get("runner_count", 1)),
+        name_prefix=str(org_raw.get("name_prefix", org_name)),
+        service_prefix=str(org_raw.get("service_prefix", org_name)),
+        extra_labels=str(org_raw.get("extra_labels", "")),
+        base_dir=base_dir,
+        runner_user=runner_user,
+    )
+
+
+def validate_orgs(orgs: list[OrgConfig]) -> list[str]:
+    """Problems that would make two blocks fight over the same resource.
+
+    Each block owns a directory tree, a set of systemd units in one user's
+    manager, and a set of runner names on one GitHub target. Two blocks
+    sharing any of those would overwrite each other on `setup` and remove
+    each other's runners on `remove`, so the config is rejected up front.
+    Sharing a *runner_user* is fine and intended: several repo blocks under
+    one account is the cheap way to run personal repos.
+    """
+    problems: list[str] = []
+    seen_name: dict[str, str] = {}
+    seen_dir: dict[str, str] = {}
+    seen_unit: dict[tuple[str, str], str] = {}
+    seen_runner: dict[tuple[str, str], str] = {}
+
+    for o in orgs:
+        if o.target is None:
+            problems.append(
+                f"[[org]] {o.name}: url {o.url!r} is not a GitHub org or repo URL"
+            )
+        if o.runner_count < 1:
+            problems.append(f"[[org]] {o.name}: runner_count must be at least 1")
+
+        if o.name in seen_name:
+            problems.append(f"[[org]] name {o.name!r} is used twice")
+        seen_name[o.name] = o.name
+
+        if o.base_dir in seen_dir:
+            problems.append(
+                f"[[org]] {o.name}: base_dir {o.base_dir!r} is also used by "
+                f"{seen_dir[o.base_dir]!r}"
+            )
+        seen_dir[o.base_dir] = o.name
+
+        # Units live in the runner user's systemd manager (or the operator's
+        # when not isolated), so the prefix only has to be unique per user.
+        unit_key = (o.runner_user, o.service_prefix)
+        if unit_key in seen_unit:
+            problems.append(
+                f"[[org]] {o.name}: service_prefix {o.service_prefix!r} is also "
+                f"used by {seen_unit[unit_key]!r} under the same account"
+            )
+        seen_unit[unit_key] = o.name
+
+        # Runner names only have to be unique on the GitHub target they
+        # register with.
+        runner_key = (o.url.rstrip("/"), o.name_prefix)
+        if runner_key in seen_runner:
+            problems.append(
+                f"[[org]] {o.name}: name_prefix {o.name_prefix!r} is also used by "
+                f"{seen_runner[runner_key]!r} on the same GitHub target"
+            )
+        seen_runner[runner_key] = o.name
+
+    return problems
+
+
+def find_config() -> Path:
+    """The config.toml that :func:`load_config` would read. Exits if none."""
+    return _find_config()
+
+
 def load_config(config_path: Path | None = None) -> Config:
     """Load and validate configuration from TOML file."""
     path = config_path or _find_config()
@@ -156,27 +303,16 @@ def load_config(config_path: Path | None = None) -> Config:
     # Parse orgs
     orgs: list[OrgConfig] = []
     for org_raw in raw.get("org", []):
-        org_name = org_raw["name"]
-        # Default base_dir to ~/.gh-runners/<org_name>, expand ~
-        raw_base = org_raw.get("base_dir", f"~/.gh-runners/{org_name}")
-        base_dir = str(Path(raw_base).expanduser())
-
-        orgs.append(
-            OrgConfig(
-                name=org_name,
-                url=org_raw["url"],
-                runner_group=org_raw.get("runner_group", "Default"),
-                runner_count=org_raw["runner_count"],
-                name_prefix=org_raw["name_prefix"],
-                service_prefix=org_raw["service_prefix"],
-                extra_labels=org_raw.get("extra_labels", ""),
-                base_dir=base_dir,
-                runner_user=str(org_raw.get("runner_user", "")),
-            )
-        )
+        orgs.append(_parse_org(org_raw))
 
     if not orgs:
         print("ERROR: No [[org]] blocks defined in config.toml")
+        sys.exit(1)
+
+    problems = validate_orgs(orgs)
+    for problem in problems:
+        print(f"ERROR: {problem}")
+    if problems:
         sys.exit(1)
 
     timeouts = raw.get("timeouts", {})
