@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v2.4.1 (2026-11-07)
+
+### Bug Fixes
+
+- **env**: Export SHELL=/bin/bash to jobs on isolated runners
+  ([#20](https://github.com/nazq/gh_runners/pull/20),
+  [`c98ffb3`](https://github.com/nazq/gh_runners/commit/c98ffb3460add3b520bf46e63018c7009956ceb5))
+
+
 ## v2.4.0 (2026-11-07)
 
 ### Features
